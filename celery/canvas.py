@@ -2164,12 +2164,32 @@ class _chord(Signature):
         app = self._get_app(body)
         tasks = (self.tasks.clone() if isinstance(self.tasks, group)
                  else group(self.tasks, app=app, task_id=self.options.get('task_id', uuid())))
+        # Freeze a selected profile name into its snapshot on the
+        # producer side: the body/header tasks are serialized (into the
+        # backend and the broker) and later re-published by workers that
+        # may not have the named profile registered.
+        if isinstance(options.get('execution_profile'), str):
+            options = dict(
+                options,
+                execution_profile=app.execution_profiles.snapshot(
+                    options['execution_profile']),
+            )
+            body.options['execution_profile'] = options['execution_profile']
         if app.conf.task_always_eager:
             with allow_join_result():
                 return self.apply(args, kwargs,
                                   body=body, task_id=task_id, **options)
 
         merged_options = dict(self.options, **options) if options else self.options
+        if isinstance(merged_options.get('execution_profile'), str):
+            # The body signature is serialized into the chord backend and
+            # later applied by the chord-unlock task on a worker, where
+            # the named profile may not be registered: freeze the snapshot
+            # on the producer side before anything is serialized.
+            merged_options['execution_profile'] = app.execution_profiles.snapshot(
+                merged_options['execution_profile'])
+            body.options['execution_profile'] = \
+                merged_options['execution_profile']
         option_task_id = merged_options.pop("task_id", None)
         if task_id is None:
             task_id = option_task_id

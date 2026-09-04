@@ -227,6 +227,12 @@ class Consumer:
         # rate limits, or None if rate limits are disabled for that task.
         self.task_buckets = defaultdict(lambda: None)
         self.reset_rate_limits()
+        # token buckets for tasks carrying an execution profile snapshot,
+        # keyed by (profile name, rate limit). The rate limit is part of
+        # the key so a profile update (a different rate) takes effect
+        # immediately for subsequent messages, while the bucket for the
+        # previous rate is left for in-flight tasks.
+        self.execution_profile_buckets = {}
 
         self.hub = hub
         if self.hub or getattr(self.pool, 'is_green', False):
@@ -296,6 +302,29 @@ class Consumer:
     def bucket_for_task(self, type):
         limit = rate(getattr(type, 'rate_limit', None))
         return TokenBucket(limit, capacity=1) if limit else None
+
+    def bucket_for_execution_profile(self, execution_profile):
+        """Token bucket enforcing a profile's rate limit on this worker.
+
+        The task message carries a frozen profile snapshot; buckets are
+        keyed by ``(profile name, rate limit)`` so that changing a
+        profile's rate limit creates a new bucket for subsequent
+        messages, while messages still carrying the previous snapshot
+        keep theirs.  Returns :const:`None` when the snapshot defines no
+        rate limit, leaving the task-type default in place.
+        """
+        if not execution_profile:
+            return None
+        rate_limit = execution_profile.get('rate_limit')
+        if not rate_limit:
+            return None
+        key = (execution_profile.get('name'), rate_limit)
+        bucket = self.execution_profile_buckets.get(key)
+        if bucket is None:
+            limit = rate(rate_limit)
+            bucket = TokenBucket(limit, capacity=1) if limit else None
+            self.execution_profile_buckets[key] = bucket
+        return bucket
 
     def reset_rate_limits(self):
         self.task_buckets.update(

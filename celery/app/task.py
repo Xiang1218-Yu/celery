@@ -86,6 +86,7 @@ class Context:
     delivery_info = None
     errbacks = None
     eta = None
+    execution_profile = None
     expires = None
     group = None
     group_index = None
@@ -182,6 +183,10 @@ class Context:
             'soft_time_limit': limit_soft,
             'time_limit': limit_hard,
             'headers': self._filter_x_death_headers(self.headers),
+            # Frozen snapshot of the execution profile selected when the
+            # task was published; retries inherit the original selection
+            # by re-publishing this snapshot (None is dismissed later).
+            'execution_profile': self.execution_profile,
             'retries': self.retries,
             'reply_to': self.reply_to,
             'replaced_task_nesting': self.replaced_task_nesting,
@@ -606,6 +611,17 @@ class Task:
                 :ref:`redis-message-priorities`. Defaults to the
                 :attr:`priority` attribute.
 
+            execution_profile (str): Name of a registered execution profile
+                (see :attr:`~celery.Celery.execution_profiles`) whose
+                constraints -- rate limit, priority and hard/soft time
+                limits -- are applied to this task request.  A frozen
+                snapshot of the profile is embedded in the task message, so
+                later profile changes only affect tasks published
+                afterwards; retries and canvas-derived tasks keep the
+                original selection.  Explicit ``priority``,
+                ``time_limit`` or ``soft_time_limit`` arguments take
+                precedence over the profile.
+
             serializer (str): Serialization method to use.
                 Can be `pickle`, `json`, `yaml`, `msgpack` or any custom
                 serialization method that's been registered
@@ -692,6 +708,13 @@ class Task:
 
         app = self._get_app()
         if app.conf.task_always_eager:
+            # send_task() is bypassed in eager mode, so resolve the
+            # selected profile here so the local request carries the
+            # same frozen snapshot a published task would.
+            profile_opt = options.get('execution_profile')
+            if isinstance(profile_opt, str):
+                options['execution_profile'] = (
+                    app.execution_profiles.snapshot(profile_opt))
             with app.producer_or_acquire(producer) as eager_producer:
                 serializer = options.get('serializer')
                 if serializer is None:
@@ -927,6 +950,7 @@ class Task:
             'callbacks': maybe_list(link),
             'errbacks': maybe_list(link_error),
             'headers': headers,
+            'execution_profile': options.get('execution_profile'),
             'timelimit': (
                 None if self.time_limit is None and self.soft_time_limit is None
                 else [self.time_limit, self.soft_time_limit]

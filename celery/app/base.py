@@ -937,6 +937,23 @@ class Celery:
         options = router.route(
             options, route_name or name, args, kwargs, task_type)
 
+        # Resolve a selected execution profile (name, object or an
+        # already-frozen snapshot propagated by retries/canvas tasks)
+        # into the frozen snapshot that travels in the message.  Workers
+        # apply exactly this snapshot, so profile updates only affect
+        # tasks published afterwards.
+        execution_profile = self.execution_profiles.resolve(
+            options.pop('execution_profile', None),
+        )
+        if execution_profile:
+            if execution_profile.get('priority') is not None:
+                options.setdefault('priority', execution_profile['priority'])
+            if time_limit is None and execution_profile.get('time_limit') is not None:
+                time_limit = execution_profile['time_limit']
+            if (soft_time_limit is None
+                    and execution_profile.get('soft_time_limit') is not None):
+                soft_time_limit = execution_profile['soft_time_limit']
+
         if eta or countdown:
             driver_type = self.producer_pool.connections.connection.transport.driver_type
             if detect_quorum_queues(self, driver_type)[0]:
@@ -1018,7 +1035,8 @@ class Celery:
             self.conf.task_send_sent_event,
             root_id, parent_id, shadow, chain,
             ignore_result=ignore_result,
-            replaced_task_nesting=replaced_task_nesting, **options
+            replaced_task_nesting=replaced_task_nesting,
+            execution_profile=execution_profile, **options
         )
 
         stamped_headers = options.pop('stamped_headers', [])
@@ -1543,6 +1561,19 @@ class Celery:
     def amqp(self):
         """AMQP related functionality: :class:`~@amqp`."""
         return instantiate(self.amqp_cls, app=self)
+
+    @cached_property
+    def execution_profiles(self):
+        """Registry of named execution profiles.
+
+        Holds reusable, named sets of per-request execution constraints
+        (rate limit, priority and hard/soft time limits).  Select a
+        profile when publishing a task with
+        ``task.apply_async(execution_profile='name')``; a snapshot of the
+        profile is frozen into the task message.
+        """
+        from celery.app.profiles import ExecutionProfileRegistry
+        return ExecutionProfileRegistry(app=self)
 
     @property
     def _backend(self):

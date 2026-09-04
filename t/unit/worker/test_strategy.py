@@ -139,6 +139,10 @@ class test_default_strategy_proto2:
         consumer.controller.state.revoked = set()
         consumer.disable_rate_limits = not rate_limits
         consumer.event_dispatcher.enabled = events
+        # Execution profile lookup: returns the per-profile token bucket
+        # (or None when the snapshot has no rate limit). Defaults to None;
+        # profile tests configure a bucket/return value.
+        consumer.bucket_for_execution_profile = Mock(return_value=None)
         s = sig.type.start_strategy(self.app, consumer, task_reserved=reserved)
         assert s
 
@@ -275,6 +279,42 @@ class test_default_strategy_proto2:
             C()
             assert C.was_reserved()
 
+    def test_when_execution_profile_rate_limited(self):
+        profile = {
+            'name': 'tenant-a', 'rate_limit': '1/m', 'priority': 7,
+            'time_limit': 60, 'soft_time_limit': 45,
+        }
+        task = self.add.s(2, 2)
+        with self._context(task, rate_limits=True) as C:
+            bucket = TokenBucket(rate('1/m'), capacity=1)
+            C.consumer.bucket_for_execution_profile.return_value = bucket
+            C.message.headers['execution_profile'] = profile
+            # a real published message also carries the profile's time
+            # limits via the existing timelimit header
+            C.message.headers['timelimit'] = [60, 45]
+            C()
+            assert C.was_rate_limited()
+            C.consumer.bucket_for_execution_profile.assert_called_once_with(
+                profile)
+            req = C.get_request()
+            assert req.execution_profile == profile
+            assert req.time_limits == [60, 45]
+
+    def test_execution_profile_without_rate_is_not_limited(self):
+        task = self.add.s(2, 2)
+        with self._context(task) as C:
+            C.message.headers['execution_profile'] = {'name': 'tenant-a'}
+            C()
+            assert C.was_reserved()
+
+    def test_execution_profile_rate_ignored_when_limits_disabled(self):
+        task = self.add.s(2, 2)
+        with self._context(task, rate_limits=False) as C:
+            C.message.headers['execution_profile'] = {
+                'name': 'tenant-a', 'rate_limit': '1/m'}
+            C()
+            assert C.was_reserved()
+
     def test_when_revoked(self):
         task = self.add.s(2, 2)
         task.freeze()
@@ -356,3 +396,9 @@ class test_hybrid_to_proto2:
     def test_custom_headers(self):
         _, headers, _, _ = hybrid_to_proto2(self.message, self.body)
         assert headers.get("custom") == "header"
+
+    def test_execution_profile_propagated(self):
+        profile = {'name': 'tenant-a', 'rate_limit': '1/m'}
+        self.body['execution_profile'] = profile
+        _, headers, _, _ = hybrid_to_proto2(self.message, self.body)
+        assert headers.get('execution_profile') == profile

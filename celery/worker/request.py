@@ -335,6 +335,18 @@ class Request:
         return {header: stamps.get(header) for header in self.stamped_headers}
 
     @property
+    def execution_profile(self):
+        """Frozen execution profile snapshot carried by the message.
+
+        The snapshot is taken when the task is published and contains
+        the profile ``name`` plus the selected ``rate_limit``,
+        ``priority`` and hard/soft time limits.  Returns :const:`None`
+        for tasks that were published without selecting a profile, in
+        which case the existing task/worker defaults are used.
+        """
+        return self._request_dict.get('execution_profile')
+
+    @property
     def correlation_id(self):
         # used similarly to reply_to
         return self._request_dict['correlation_id']

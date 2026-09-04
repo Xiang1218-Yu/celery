@@ -21,6 +21,7 @@ Error Hierarchy
             - :exc:`~celery.exceptions.TaskRevokedError`
             - :exc:`~celery.exceptions.InvalidTaskError`
             - :exc:`~celery.exceptions.ChordError`
+            - :exc:`~celery.exceptions.UnknownExecutionProfile`
         - :exc:`~celery.exceptions.BackendError`
             - :exc:`~celery.exceptions.BackendGetMetaError`
             - :exc:`~celery.exceptions.BackendStoreError`
@@ -78,7 +79,7 @@ __all__ = (
     'TaskError', 'QueueNotFound', 'IncompleteStream',
     'NotRegistered', 'AlreadyRegistered', 'TimeoutError',
     'MaxRetriesExceededError', 'TaskRevokedError',
-    'InvalidTaskError', 'ChordError',
+    'InvalidTaskError', 'ChordError', 'UnknownExecutionProfile',
 
     # Backend related errors.
     'BackendError', 'BackendGetMetaError', 'BackendStoreError',
@@ -228,6 +229,30 @@ class NotRegistered(KeyError, TaskError):
 
     def __repr__(self):
         return UNREGISTERED_FMT.format(self)
+
+
+class UnknownExecutionProfile(KeyError, TaskError):
+    """A named execution profile was referenced that is not registered.
+
+    Raised when a task is published selecting an execution profile name
+    that does not exist in the app's
+    :attr:`~celery.Celery.execution_profiles` registry.
+    """
+
+    def __init__(self, name=None, message=None):
+        self.profile_name = name
+        if message is None:
+            message = (
+                f'Execution profile {name!r} is not registered. '
+                f'Use app.execution_profiles.add({name!r}, ...) to create it.'
+            )
+        super().__init__(message)
+
+    def __str__(self):
+        return self.args[0] if self.args else ''
+
+    def __repr__(self):
+        return f'<UnknownExecutionProfile: {self.profile_name!r}>'
 
 
 class AlreadyRegistered(TaskError):

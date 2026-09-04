@@ -38,6 +38,37 @@ def utf8dict(d, encoding='utf-8'):
             for k, v in d.items()}
 
 
+def _stamp_sig_execution_profile(sig, snapshot):
+    """Stamp an embedded signature with an execution profile snapshot.
+
+    Embedded signatures travel either as canvas objects (which are
+    ``dict`` subclasses holding an ``'options'`` mapping) or as plain
+    serialized dicts of the same shape.  Both are handled uniformly.
+    A signature that already selects a profile keeps its own choice.
+    """
+    if isinstance(sig, dict):
+        options = sig.get('options')
+        if isinstance(options, dict):
+            options.setdefault('execution_profile', snapshot)
+
+
+def _stamp_embedded_signatures(snapshot, callbacks, errbacks, chain, chord):
+    """Propagate a profile snapshot to signatures embedded in the message.
+
+    Callbacks, errbacks, chain successors and chord bodies are delivered
+    inside the task message and re-published by the worker.  Stamping
+    them with the frozen snapshot makes canvas-derived tasks inherit the
+    profile selection even though the worker does not know the named
+    profile.
+    """
+    for container in (callbacks, errbacks, chain):
+        if container:
+            for sig in container:
+                _stamp_sig_execution_profile(sig, snapshot)
+    if chord is not None:
+        _stamp_sig_execution_profile(chord, snapshot)
+
+
 class Queues(dict):
     """Queue name⇒ declaration mapping.
 
@@ -331,7 +362,7 @@ class AMQP:
                    create_sent_event=False, root_id=None, parent_id=None,
                    shadow=None, chain=None, now=None, timezone=None,
                    origin=None, ignore_result=False, argsrepr=None, kwargsrepr=None, stamped_headers=None,
-                   replaced_task_nesting=0, **options):
+                   replaced_task_nesting=0, execution_profile=None, **options):
 
         args = args or ()
         kwargs = kwargs or {}
@@ -388,7 +419,16 @@ class AMQP:
             'replaced_task_nesting': replaced_task_nesting,
             'stamped_headers': stamped_headers,
             'stamps': stamps,
+            'execution_profile': execution_profile,
         }
+
+        # Propagate the frozen profile snapshot to tasks that are
+        # derived from this one (callbacks, errbacks, chain successors
+        # and the chord body), so retries/canvas tasks keep the exact
+        # profile selection even when re-published by the worker.
+        if execution_profile:
+            _stamp_embedded_signatures(
+                execution_profile, callbacks, errbacks, chain, chord)
 
         return task_message(
             headers=headers,
@@ -424,7 +464,7 @@ class AMQP:
                    time_limit=None, soft_time_limit=None,
                    create_sent_event=False, root_id=None, parent_id=None,
                    shadow=None, now=None, timezone=None,
-                   **compat_kwargs):
+                   execution_profile=None, **compat_kwargs):
         args = args or ()
         kwargs = kwargs or {}
         utc = self.utc
@@ -442,6 +482,13 @@ class AMQP:
             expires = now + timedelta(seconds=expires)
         eta = eta and eta.isoformat()
         expires = expires and expires.isoformat()
+
+        # Propagate the frozen profile snapshot to tasks derived from
+        # this one (protocol 1 links callbacks/errbacks and the chord
+        # body inside the message body).
+        if execution_profile:
+            _stamp_embedded_signatures(
+                execution_profile, callbacks, errbacks, None, chord)
 
         return task_message(
             headers={},
@@ -465,6 +512,7 @@ class AMQP:
                 'timelimit': (time_limit, soft_time_limit),
                 'taskset': group_id,
                 'chord': chord,
+                'execution_profile': execution_profile,
             },
             sent_event={
                 'uuid': task_id,

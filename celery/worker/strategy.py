@@ -50,6 +50,7 @@ def hybrid_to_proto2(message, body):
         'argsrepr': body.get('argsrepr'),
         'kwargsrepr': body.get('kwargsrepr'),
         'origin': body.get('origin'),
+        'execution_profile': body.get('execution_profile'),
     }
     headers.update(message.headers or {})
 
@@ -189,6 +190,12 @@ def default(task, app, consumer,
                 req.reject(requeue=False)
         if rate_limits_enabled:
             bucket = get_bucket(task.name)
+            # A per-request execution profile snapshot overrides the
+            # task-type rate limit for this message only.
+            profile_bucket = consumer.bucket_for_execution_profile(
+                req.execution_profile)
+            if profile_bucket is not None:
+                bucket = profile_bucket
 
         if eta and bucket:
             consumer.qos.increment_eventually()
