@@ -5,12 +5,14 @@ from kombu.asynchronous.timer import to_timestamp
 
 from celery import signals
 from celery.app import trace as _app_trace
+from celery.app.capabilities import satisfies
 from celery.exceptions import InvalidTaskError
 from celery.utils.imports import symbol_by_name
 from celery.utils.log import get_logger
 from celery.utils.saferepr import saferepr
 from celery.utils.time import timezone
 
+from . import state as worker_state
 from .request import create_request_cls
 from .state import task_reserved
 
@@ -50,6 +52,7 @@ def hybrid_to_proto2(message, body):
         'argsrepr': body.get('argsrepr'),
         'kwargsrepr': body.get('kwargsrepr'),
         'origin': body.get('origin'),
+        'capabilities': body.get('capabilities'),
     }
     headers.update(message.headers or {})
 
@@ -128,6 +131,7 @@ def default(task, app, consumer,
                              app=app)
 
     revoked_tasks = consumer.controller.state.revoked
+    worker_capabilities = worker_state.capabilities
 
     def task_message_handler(message, body, ack, reject, callbacks,
                              to_timestamp=to_timestamp):
@@ -160,6 +164,24 @@ def default(task, app, consumer,
             }
             info(_app_trace.LOG_RECEIVED, context, extra={'data': context})
         if (req.expires or req.id in revoked_tasks) and req.revoked():
+            return
+
+        # Capability guard: refuse to execute tasks that require
+        # capability tags this worker does not declare, and requeue the
+        # message so a qualified worker can pick it up. Publishers
+        # normally refuse to publish such tasks, so this only handles
+        # races (e.g. the last qualified worker going away).
+        required_caps = req.capabilities
+        if required_caps and not satisfies(
+                worker_capabilities, required_caps):
+            logger.warning(
+                'Rejecting task %s[%s]: worker is missing required '
+                'capabilities %s (declares %s)',
+                req.name, req.id, sorted(required_caps),
+                sorted(worker_capabilities))
+            signals.task_rejected.send(sender=consumer, message=message,
+                                       exc=None)
+            req.reject(requeue=True)
             return
 
         signals.task_received.send(sender=consumer, request=req)

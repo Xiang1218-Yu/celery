@@ -6,6 +6,7 @@ at regular intervals (may not be an actual thread).
 from celery.signals import heartbeat_sent
 from celery.utils.sysinfo import load_average
 
+from . import state as worker_state
 from .state import SOFTWARE_INFO, active_requests, all_total_count
 
 __all__ = ('Heart',)
@@ -43,6 +44,7 @@ class Heart:
                                  active=len(active_requests),
                                  processed=all_total_count[0],
                                  loadavg=load_average(),
+                                 capabilities=sorted(worker_state.capabilities),
                                  retry=retry,
                                  **SOFTWARE_INFO)
 

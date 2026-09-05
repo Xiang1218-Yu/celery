@@ -2,6 +2,7 @@
 from celery import bootsteps
 from celery.utils.log import get_logger
 
+from .. import state as worker_state
 from .events import Events
 
 __all__ = ('Mingle',)
@@ -51,7 +52,10 @@ class Mingle(bootsteps.StartStopStep):
     def send_hello(self, c):
         inspect = c.app.control.inspect(timeout=1.0, connection=c.connection)
         our_revoked = c.controller.state.revoked
-        replies = inspect.hello(c.hostname, our_revoked._data) or {}
+        replies = inspect.hello(
+            c.hostname, our_revoked._data,
+            capabilities=sorted(worker_state.capabilities),
+        ) or {}
         replies.pop(c.hostname, None)  # delete my own response
         return replies
 
@@ -63,10 +67,23 @@ class Mingle(bootsteps.StartStopStep):
             raise
         except Exception as exc:  # pylint: disable=broad-except
             exception('mingle: sync with %s failed: %r', nodename, exc)
+        else:
+            # Refresh the capability view with what the neighbor
+            # advertises, so reconnecting workers immediately see each
+            # other's capability tags.
+            capabilities = reply.get('capabilities') if reply else None
+            if capabilities is not None:
+                c.app.capabilities.remember(nodename, capabilities)
 
-    def sync_with_node(self, c, clock=None, revoked=None, **kwargs):
+    def sync_with_node(self, c, clock=None, revoked=None,
+                       capabilities=None, **kwargs):
         self.on_clock_event(c, clock)
         self.on_revoked_received(c, revoked)
+        self.on_capabilities_received(c, capabilities)
+
+    def on_capabilities_received(self, c, capabilities):
+        if capabilities:
+            debug('mingle: neighbor capabilities: %r', capabilities)
 
     def on_clock_event(self, c, clock):
         c.app.clock.adjust(clock) if clock else c.app.clock.forward()

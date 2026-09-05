@@ -100,10 +100,11 @@ class WorkController:
 
     def setup_instance(self, queues=None, ready_callback=None, pidfile=None,
                        include=None, use_eventloop=None, exclude_queues=None,
-                       **kwargs):
+                       capabilities=None, **kwargs):
         self.pidfile = pidfile
         self.setup_queues(queues, exclude_queues)
         self.setup_includes(str_to_list(include))
+        self.setup_capabilities(capabilities)
 
         # Set default concurrency
         if not self.concurrency:
@@ -179,6 +180,19 @@ class WorkController:
                 DESELECT_UNKNOWN_QUEUE.strip().format(exclude, exc))
         if self.app.conf.worker_direct:
             self.app.amqp.queues.select_add(worker_direct(self.hostname))
+
+    def setup_capabilities(self, capabilities=None):
+        """Seed the worker's declared capability tags.
+
+        Capabilities can be passed explicitly (e.g. via the
+        ``--capability`` command line option) or taken from the
+        :setting:`worker_capabilities` setting.
+        """
+        capabilities = capabilities or self.app.conf.worker_capabilities
+        state.set_capabilities(capabilities)
+        if state.capabilities:
+            logger.info('Worker capabilities: %s',
+                        sorted(state.capabilities))
 
     def setup_includes(self, includes):
         # Update celery_include to have all known task modules, so that we
@@ -298,7 +312,8 @@ class WorkController:
         return {'total': self.state.total_count,
                 'pid': os.getpid(),
                 'clock': str(self.app.clock),
-                'uptime': round(uptime.total_seconds())}
+                'uptime': round(uptime.total_seconds()),
+                'capabilities': sorted(state.capabilities)}
 
     def rusage(self):
         if resource is None:

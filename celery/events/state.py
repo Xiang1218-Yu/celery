@@ -154,13 +154,14 @@ class Worker:
 
     _fields = ('hostname', 'pid', 'freq', 'heartbeats', 'clock',
                'active', 'processed', 'loadavg', 'sw_ident',
-               'sw_ver', 'sw_sys')
+               'sw_ver', 'sw_sys', 'capabilities')
     if not PYPY:  # pragma: no cover
         __slots__ = _fields + ('event', '__dict__', '__weakref__')
 
     def __init__(self, hostname=None, pid=None, freq=60,
                  heartbeats=None, clock=0, active=None, processed=None,
-                 loadavg=None, sw_ident=None, sw_ver=None, sw_sys=None):
+                 loadavg=None, sw_ident=None, sw_ver=None, sw_sys=None,
+                 capabilities=None):
         self.hostname = hostname
         self.pid = pid
         self.freq = freq
@@ -172,13 +173,14 @@ class Worker:
         self.sw_ident = sw_ident
         self.sw_ver = sw_ver
         self.sw_sys = sw_sys
+        self.capabilities = capabilities
         self.event = self._create_event_handler()
 
     def __reduce__(self):
         return self.__class__, (self.hostname, self.pid, self.freq,
                                 self.heartbeats, self.clock, self.active,
                                 self.processed, self.loadavg, self.sw_ident,
-                                self.sw_ver, self.sw_sys)
+                                self.sw_ver, self.sw_sys, self.capabilities)
 
     def _create_event_handler(self):
         _set = object.__setattr__

@@ -11,6 +11,7 @@ from kombu.utils.functional import maybe_list
 from kombu.utils.objects import cached_property
 
 from celery import signals
+from celery.app.capabilities import normalize_capabilities
 from celery.utils.nodenames import anon_nodename
 from celery.utils.saferepr import saferepr
 from celery.utils.text import indent as textindent
@@ -331,7 +332,7 @@ class AMQP:
                    create_sent_event=False, root_id=None, parent_id=None,
                    shadow=None, chain=None, now=None, timezone=None,
                    origin=None, ignore_result=False, argsrepr=None, kwargsrepr=None, stamped_headers=None,
-                   replaced_task_nesting=0, **options):
+                   replaced_task_nesting=0, capabilities=None, **options):
 
         args = args or ()
         kwargs = kwargs or {}
@@ -368,6 +369,7 @@ class AMQP:
             root_id = task_id
 
         stamps = {header: options[header] for header in stamped_headers or []}
+        required_capabilities = normalize_capabilities(capabilities)
         headers = {
             'lang': 'py',
             'task': name,
@@ -388,6 +390,7 @@ class AMQP:
             'replaced_task_nesting': replaced_task_nesting,
             'stamped_headers': stamped_headers,
             'stamps': stamps,
+            'capabilities': list(required_capabilities) or None,
         }
 
         return task_message(
@@ -424,7 +427,7 @@ class AMQP:
                    time_limit=None, soft_time_limit=None,
                    create_sent_event=False, root_id=None, parent_id=None,
                    shadow=None, now=None, timezone=None,
-                   **compat_kwargs):
+                   capabilities=None, **compat_kwargs):
         args = args or ()
         kwargs = kwargs or {}
         utc = self.utc
@@ -442,6 +445,7 @@ class AMQP:
             expires = now + timedelta(seconds=expires)
         eta = eta and eta.isoformat()
         expires = expires and expires.isoformat()
+        required_capabilities = normalize_capabilities(capabilities)
 
         return task_message(
             headers={},
@@ -465,6 +469,7 @@ class AMQP:
                 'timelimit': (time_limit, soft_time_limit),
                 'taskset': group_id,
                 'chord': chord,
+                'capabilities': list(required_capabilities) or None,
             },
             sent_event={
                 'uuid': task_id,

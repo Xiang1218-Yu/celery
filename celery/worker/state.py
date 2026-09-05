@@ -22,6 +22,8 @@ __all__ = (
     'SOFTWARE_INFO', 'reserved_requests', 'active_requests',
     'total_count', 'revoked', 'task_reserved', 'maybe_shutdown',
     'task_accepted', 'task_ready', 'Persistent',
+    'capabilities', 'set_capabilities', 'add_capabilities',
+    'remove_capabilities',
 )
 
 
@@ -98,6 +100,40 @@ revoked = LimitedSet(maxlen=REVOKES_MAX, expires=REVOKE_EXPIRES)
 
 #: Mapping of stamped headers flagged for revoking.
 revoked_stamps = {}
+
+#: Capability tags declared by this worker.
+#:
+#: Seeded from the :setting:`worker_capabilities` setting at worker
+#: startup and mutable at runtime through the ``add_capability`` /
+#: ``remove_capability`` remote control commands.  The set is included
+#: in every heartbeat event and in mingle hello replies.
+capabilities = set()
+
+
+def _normalize_capabilities(caps):
+    # Local import to avoid a circular import at module load time.
+    from celery.app.capabilities import normalize_capabilities
+    return normalize_capabilities(caps)
+
+
+def set_capabilities(caps):
+    """Replace the set of capability tags declared by this worker."""
+    capabilities.clear()
+    capabilities.update(_normalize_capabilities(caps))
+    return set(capabilities)
+
+
+def add_capabilities(caps):
+    """Add capability tags to the set declared by this worker."""
+    capabilities.update(_normalize_capabilities(caps))
+    return set(capabilities)
+
+
+def remove_capabilities(caps):
+    """Remove capability tags from the set declared by this worker."""
+    capabilities.difference_update(_normalize_capabilities(caps))
+    return set(capabilities)
+
 
 should_stop = None
 should_terminate = None

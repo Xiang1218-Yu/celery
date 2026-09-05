@@ -322,6 +322,9 @@ NAMESPACES = Namespace(
         store_errors_even_if_ignored=Option(False, type='bool'),
         track_started=Option(False, type='bool'),
         allow_error_cb_on_chord_header=Option(False, type='bool'),
+        capability_routing=Option(True, type='bool'),
+        capability_state_ttl=Option(1.0, type='float'),
+        capability_inspect_timeout=Option(2.0, type='float'),
     ),
     worker=Namespace(
         __old__=OLD_NS_WORKER,
@@ -374,6 +377,7 @@ NAMESPACES = Namespace(
         timer=Option(type='string'),
         timer_precision=Option(1.0, type='float'),
         detect_quorum_queues=Option(True, type='bool'),
+        capabilities=Option((), type='tuple'),
     ),
 )
 

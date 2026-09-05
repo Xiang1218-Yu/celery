@@ -266,6 +266,13 @@ def detach(path, argv, logfile=None, pidfile=None, uid=None,
               type=COMMA_SEPARATED_LIST,
               cls=CeleryOption,
               help_group="Queue Options")
+@click.option('--capability',
+              multiple=True,
+              cls=CeleryOption,
+              help_group="Features",
+              help="Declare a worker capability tag. May be repeated to "
+                   "declare several tags, e.g. "
+                   "``--capability gpu --capability ffmpeg``.")
 @click.option('--without-gossip',
               is_flag=True,
               cls=CeleryOption,
@@ -325,6 +332,12 @@ def worker(ctx, hostname=None, pool_cls=None, app=None, uid=None, gid=None,
         app = ctx.obj.app
         if 'disable_prefetch' in kwargs and kwargs['disable_prefetch'] is not None:
             app.conf.worker_disable_prefetch = kwargs.pop('disable_prefetch')
+        cli_capabilities = kwargs.pop('capability', ())
+        if cli_capabilities:
+            app.conf.worker_capabilities = (
+                tuple(app.conf.worker_capabilities or ()) +
+                tuple(cli_capabilities)
+            )
         if ctx.args:
             try:
                 app.config_from_cmdline(ctx.args, namespace='worker')

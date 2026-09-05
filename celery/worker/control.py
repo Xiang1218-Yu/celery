@@ -404,13 +404,55 @@ def heartbeat(state):
     logger.debug('Heartbeat requested by remote.')
     dispatcher = state.consumer.event_dispatcher
     if dispatcher:
-        dispatcher.send('worker-heartbeat', freq=5, **worker_state.SOFTWARE_INFO)
+        dispatcher.send('worker-heartbeat', freq=5,
+                        capabilities=sorted(worker_state.capabilities),
+                        **worker_state.SOFTWARE_INFO)
+
+
+@inspect_command()
+def capabilities(state, **kwargs):
+    """List capability tags declared by this worker.
+
+    Used by capability-based routing to discover which online workers
+    satisfy a task's required capabilities.
+    """
+    return ok(sorted(worker_state.capabilities))
+
+
+@control_command(
+    variadic='capability',
+    signature='<capability1> [capability2 [...]]',
+)
+def add_capability(state, capability, **kwargs):
+    """Add capability tag(s) to this worker at runtime.
+
+    The new set is advertised by subsequent heartbeats and mingle
+    handshakes.
+    """
+    caps = worker_state.add_capabilities(maybe_list(capability))
+    logger.info('Capabilities added; now declaring: %s', sorted(caps))
+    return ok(f'capabilities now: {sorted(caps)}')
+
+
+@control_command(
+    variadic='capability',
+    signature='<capability1> [capability2 [...]]',
+)
+def remove_capability(state, capability, **kwargs):
+    """Remove capability tag(s) from this worker at runtime.
+
+    The new set is advertised by subsequent heartbeats and mingle
+    handshakes.
+    """
+    caps = worker_state.remove_capabilities(maybe_list(capability))
+    logger.info('Capabilities removed; now declaring: %s', sorted(caps))
+    return ok(f'capabilities now: {sorted(caps)}')
 
 
 # -- Worker
 
 @inspect_command(visible=False)
-def hello(state, from_node, revoked=None, **kwargs):
+def hello(state, from_node, revoked=None, capabilities=None, **kwargs):
     """Request mingle sync-data."""
     # pylint: disable=redefined-outer-name
     # XXX Note that this redefines `revoked`:
@@ -421,9 +463,15 @@ def hello(state, from_node, revoked=None, **kwargs):
             worker_state.revoked.update(revoked)
         # Do not send expired items to the other worker.
         worker_state.revoked.purge()
+        if capabilities is not None:
+            # Remember the capabilities the reconnecting neighbor
+            # advertises so that routing decisions made by this worker
+            # (e.g. chain/chord derived tasks) use an up-to-date view.
+            state.app.capabilities.remember(from_node, capabilities)
         return {
             'revoked': worker_state.revoked._data,
             'clock': state.app.clock.forward(),
+            'capabilities': sorted(worker_state.capabilities),
         }
 
 

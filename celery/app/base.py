@@ -25,10 +25,11 @@ from kombu.utils.objects import cached_property
 from kombu.utils.uuid import uuid
 from vine import starpromise
 
-from celery import platforms, signals
+from celery import platforms, signals, states
 from celery._state import (_announce_app_finalized, _deregister_app, _register_app, _set_current_app, _task_stack,
                            connect_on_app_finalize, get_current_app, get_current_worker_task, set_default_app)
-from celery.exceptions import AlwaysEagerIgnored, ImproperlyConfigured, OperationalError
+from celery.app.capabilities import normalize_capabilities
+from celery.exceptions import AlwaysEagerIgnored, ImproperlyConfigured, NoQualifiedWorkerError, OperationalError
 from celery.loaders import get_loader_cls
 from celery.local import PromiseProxy, maybe_evaluate
 from celery.utils import abstract
@@ -314,6 +315,7 @@ class Celery:
     loader_cls = None
     log_cls = 'celery.app.log:Logging'
     control_cls = 'celery.app.control:Control'
+    capabilities_cls = 'celery.app.capabilities:CapabilityRegistry'
     task_cls = 'celery.app.task:Task'
     registry_cls = 'celery.app.registry:TaskRegistry'
 
@@ -937,6 +939,16 @@ class Celery:
         options = router.route(
             options, route_name or name, args, kwargs, task_type)
 
+        required_capabilities = normalize_capabilities(
+            options.pop('capabilities', None))
+        if not required_capabilities and task_type is not None:
+            # Task classes may declare the requirement as an attribute.
+            required_capabilities = normalize_capabilities(
+                getattr(task_type, 'capabilities', None))
+        if required_capabilities and conf.task_capability_routing:
+            self._ensure_worker_capabilities(
+                required_capabilities, name, task_id, ignore_result)
+
         if eta or countdown:
             driver_type = self.producer_pool.connections.connection.transport.driver_type
             if detect_quorum_queues(self, driver_type)[0]:
@@ -1018,7 +1030,9 @@ class Celery:
             self.conf.task_send_sent_event,
             root_id, parent_id, shadow, chain,
             ignore_result=ignore_result,
-            replaced_task_nesting=replaced_task_nesting, **options
+            replaced_task_nesting=replaced_task_nesting,
+            capabilities=required_capabilities or None,
+            **options
         )
 
         stamped_headers = options.pop('stamped_headers', [])
@@ -1045,6 +1059,38 @@ class Celery:
             if parent:
                 parent.add_trail(result)
         return result
+
+    def _ensure_worker_capabilities(self, required, name, task_id,
+                                    ignore_result):
+        """Refuse to publish a task no online worker can handle.
+
+        When capability-based routing finds no online worker declaring
+        all of ``required``, the outcome is made observable in a stable
+        way: a :exc:`~celery.exceptions.NoQualifiedWorkerError` is
+        raised, the :signal:`~celery.signals.task_routing_rejected`
+        signal is dispatched and, unless results are ignored, the
+        result backend records a terminal :data:`~celery.states.FAILURE`
+        state carrying that exception.
+        """
+        try:
+            self.capabilities.ensure_qualified(required, task=name)
+        except NoQualifiedWorkerError as exc:
+            logger.warning(
+                'Task %r (%s) was not published: %s',
+                name, task_id, exc.message)
+            signals.task_routing_rejected.send(
+                sender=name, task=name, task_id=task_id,
+                required_capabilities=list(required),
+                available_workers=exc.available, reason=exc.message)
+            if not ignore_result:
+                try:
+                    self.backend.store_result(
+                        task_id, exc, states.FAILURE, traceback=None)
+                except Exception as store_exc:  # pragma: no cover
+                    logger.warning(
+                        'Could not record capability routing failure '
+                        'for task %s: %r', task_id, store_exc)
+            raise
 
     def connection_for_read(self, url=None, **kwargs):
         """Establish connection used for consuming.
@@ -1585,6 +1631,11 @@ class Celery:
     def control(self):
         """Remote control: :class:`~@control`."""
         return instantiate(self.control_cls, app=self)
+
+    @cached_property
+    def capabilities(self):
+        """Online worker capability view: :class:`~@capabilities`."""
+        return instantiate(self.capabilities_cls, app=self)
 
     @cached_property
     def events(self):

@@ -2,7 +2,7 @@ import errno
 import logging
 import socket
 from collections import deque
-from unittest.mock import MagicMock, Mock, call, patch
+from unittest.mock import ANY, MagicMock, Mock, call, patch
 
 import pytest
 from amqp import ChannelError
@@ -1551,7 +1551,8 @@ class test_Mingle:
         our_revoked = c.controller.state.revoked = LimitedSet()
 
         mingle.start(c)
-        I.hello.assert_called_with(c.hostname, our_revoked._data)
+        I.hello.assert_called_with(c.hostname, our_revoked._data,
+                                   capabilities=ANY)
         c.app.clock.adjust.assert_has_calls([
             call(312), call(29),
         ], any_order=True)

@@ -425,6 +425,7 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
 
     def _dispatch_callbacks_and_chain(
         retval, callbacks, chain, parent_id, root_id, priority,
+        capabilities=None,
     ):
         """Dispatch callbacks and chain for a completed task.
 
@@ -437,35 +438,48 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
         re-dispatch the already-sent callbacks.  This is acceptable
         under Celery's at-least-once delivery model.
         """
+        required_caps = list(capabilities) if capabilities else None
+
+        def _inherit_capabilities(sig):
+            # Derived tasks keep the capability requirements of the
+            # completed task, unless the signature declares its own.
+            if (required_caps and sig is not None and
+                    isinstance(getattr(sig, 'options', None), dict) and
+                    'capabilities' not in sig.options):
+                sig.set(capabilities=required_caps)
+            return sig
+
         if callbacks:
             if len(callbacks) > 1:
                 sigs, groups = [], []
                 for sig in callbacks:
-                    sig = signature(sig, app=app)
+                    sig = _inherit_capabilities(signature(sig, app=app))
                     if isinstance(sig, group):
                         groups.append(sig)
                     else:
                         sigs.append(sig)
                 for group_ in groups:
+                    _inherit_capabilities(group_)
                     group_.apply_async(
                         (retval,),
                         parent_id=parent_id, root_id=root_id,
                         priority=priority,
                     )
                 if sigs:
-                    group(sigs, app=app).apply_async(
+                    _inherit_capabilities(group(sigs, app=app)).apply_async(
                         (retval,),
                         parent_id=parent_id, root_id=root_id,
                         priority=priority,
                     )
             else:
-                signature(callbacks[0], app=app).apply_async(
+                _inherit_capabilities(
+                    signature(callbacks[0], app=app)).apply_async(
                     (retval,),
                     parent_id=parent_id, root_id=root_id,
                     priority=priority,
                 )
         if chain:
-            _chsig = signature(chain[-1], app=app)
+            _chsig = _inherit_capabilities(signature(chain[-1], app=app))
             _chsig.apply_async(
                 (retval,), chain=chain[:-1],
                 parent_id=parent_id, root_id=root_id,
@@ -542,6 +556,8 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
                                     stored_retval, _callbacks, _chain,
                                     parent_id=uuid, root_id=_root_id,
                                     priority=_priority,
+                                    capabilities=task_request.get(
+                                        'capabilities'),
                                 )
                             successful_requests.add(task_request.id)
                         except MemoryError:
@@ -621,6 +637,7 @@ def build_tracer(name, task, loader=None, hostname=None, store_errors=True,
                             task_request.chain,
                             parent_id=uuid, root_id=root_id,
                             priority=task_priority,
+                            capabilities=task_request.get('capabilities'),
                         )
                         task.backend.mark_as_done(
                             uuid, retval, task_request, publish_result,

@@ -10,7 +10,8 @@ from kombu.utils.uuid import uuid
 from celery import current_app, states
 from celery._state import _task_stack
 from celery.canvas import _chain, group, signature
-from celery.exceptions import Ignore, ImproperlyConfigured, MaxRetriesExceededError, Reject, Retry
+from celery.exceptions import (Ignore, ImproperlyConfigured, MaxRetriesExceededError, NoQualifiedWorkerError, Reject,
+                               Retry)
 from celery.local import class_property
 from celery.result import EagerResult, denied_join_result
 from celery.utils import abstract, deprecated
@@ -112,6 +113,7 @@ class Context:
     utc = None
     stamped_headers = None
     stamps = None
+    capabilities = None
 
     def __init__(self, *args, **kwargs):
         self.update(*args, **kwargs)
@@ -186,6 +188,7 @@ class Context:
             'reply_to': self.reply_to,
             'replaced_task_nesting': self.replaced_task_nesting,
             'origin': self.origin,
+            'capabilities': tuple(self.capabilities) if self.capabilities else None,
         }
         if hasattr(self, 'stamps') and hasattr(self, 'stamped_headers'):
             if self.stamps is not None and self.stamped_headers is not None:
@@ -375,6 +378,15 @@ class Task:
     #: :ref:`routing-options-rabbitmq-priorities` and
     #: :ref:`redis-message-priorities`.
     priority = None
+
+    #: Capability tags a task requires from the worker that executes it.
+    #:
+    #: Can be set as a task class attribute or passed per call as
+    #: ``apply_async(capabilities=...)``.  Publishing fails with
+    #: :exc:`~celery.exceptions.NoQualifiedWorkerError` when no online
+    #: worker declares all of the required tags.  Tasks without
+    #: capabilities keep the existing routing and consumption semantics.
+    capabilities = None
 
     #: Max length of result representation used in logs and events.
     resultrepr_maxsize = 1024
@@ -644,6 +656,17 @@ class Task:
                 The headers can be used as an overlay for custom labeling
                 using the :ref:`canvas-stamping` feature.
 
+            capabilities (Set[str], List[str], str): Capability tags that
+                the worker executing this task must declare. When set,
+                publishing fails with
+                :exc:`~celery.exceptions.NoQualifiedWorkerError` if no
+                online worker declares every required tag. The
+                requirement is inherited by retries, replacements and
+                chain/group/chord derived tasks. Tasks without
+                capabilities use the normal routing and consumption
+                behavior. See also the :setting:`worker_capabilities`
+                setting and ``celery worker --capability``.
+
             task_id (str): Optional argument to override the default task id.
                 By default, Celery generates a unique id (UUID4) for every task
                 submission. You can instead provide your own string identifier.
@@ -689,6 +712,8 @@ class Task:
         options.setdefault('ignore_result', self.ignore_result)
         if self.priority:
             options.setdefault('priority', self.priority)
+        if self.capabilities:
+            options.setdefault('capabilities', self.capabilities)
 
         app = self._get_app()
         if app.conf.task_always_eager:
@@ -871,6 +896,13 @@ class Task:
 
         try:
             S.apply_async()
+        except NoQualifiedWorkerError:
+            # No online worker can handle the retry either: surface the
+            # stable, typed routing failure instead of wrapping it into
+            # a generic reject, so both the original task and the retry
+            # attempt settle in a terminal FAILURE with that exception.
+            # (The routing gate already logged and signalled the cause.)
+            raise
         except Exception as exc:
             raise Reject(exc, requeue=False)
         if throw:
@@ -1089,11 +1121,21 @@ class Task:
             replaced_task_nesting=replaced_task_nesting
         )
 
+        # Replacement tasks inherit the capability requirements of the
+        # task being replaced, unless the replacement signature declares
+        # its own requirements.
+        required_capabilities = self.request.get('capabilities') or None
+        if required_capabilities and 'capabilities' not in sig.options:
+            sig.set(capabilities=list(required_capabilities))
+
         # If the replaced task is a chain, we want to set all of the chain tasks
         # with the same replaced_task_nesting value to mark their replacement nesting level
         if isinstance(sig, _chain):
             for chain_task in maybe_list(sig.tasks) or []:
                 chain_task.set(replaced_task_nesting=replaced_task_nesting)
+                if (required_capabilities and
+                        'capabilities' not in chain_task.options):
+                    chain_task.set(capabilities=list(required_capabilities))
 
         # If the task being replaced is part of a chain, we need to re-create
         # it with the replacement signature - these subsequent tasks will
@@ -1101,6 +1143,9 @@ class Task:
         for t in reversed(self.request.chain or []):
             chain_task = signature(t, app=self.app)
             chain_task.set(replaced_task_nesting=replaced_task_nesting)
+            if (required_capabilities and
+                    'capabilities' not in chain_task.options):
+                chain_task.set(capabilities=list(required_capabilities))
             sig |= chain_task
         return self.on_replace(sig)
 

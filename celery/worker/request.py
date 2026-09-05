@@ -326,6 +326,16 @@ class Request:
         return self._request_dict.get('groups', [])
 
     @property
+    def capabilities(self):
+        """Capability tags required by this task message.
+
+        Returns an empty tuple for tasks that do not require any
+        specific worker capability.
+        """
+        caps = self._request_dict.get('capabilities')
+        return tuple(caps) if caps else ()
+
+    @property
     def stamped_headers(self) -> list:
         return self._request_dict.get('stamped_headers') or []
 

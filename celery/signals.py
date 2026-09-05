@@ -17,7 +17,8 @@ __all__ = (
     'before_task_publish', 'after_task_publish', 'task_internal_error',
     'task_prerun', 'task_postrun', 'task_success',
     'task_received', 'task_rejected', 'task_unknown',
-    'task_retry', 'task_failure', 'task_revoked', 'celeryd_init',
+    'task_retry', 'task_failure', 'task_revoked', 'task_routing_rejected',
+    'celeryd_init',
     'celeryd_after_setup', 'worker_init', 'worker_before_create_process',
     'worker_process_init', 'worker_process_shutdown', 'worker_ready',
     'worker_shutdown', 'worker_shutting_down', 'setup_logging',
@@ -80,6 +81,13 @@ task_revoked = Signal(
 task_rejected = Signal(
     name='task_rejected',
     providing_args={'message', 'exc'},
+)
+task_routing_rejected = Signal(
+    name='task_routing_rejected',
+    providing_args={
+        'task', 'task_id', 'required_capabilities', 'available_workers',
+        'reason',
+    },
 )
 task_unknown = Signal(
     name='task_unknown',

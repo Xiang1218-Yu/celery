@@ -21,6 +21,7 @@ Error Hierarchy
             - :exc:`~celery.exceptions.TaskRevokedError`
             - :exc:`~celery.exceptions.InvalidTaskError`
             - :exc:`~celery.exceptions.ChordError`
+            - :exc:`~celery.exceptions.NoQualifiedWorkerError`
         - :exc:`~celery.exceptions.BackendError`
             - :exc:`~celery.exceptions.BackendGetMetaError`
             - :exc:`~celery.exceptions.BackendStoreError`
@@ -78,7 +79,7 @@ __all__ = (
     'TaskError', 'QueueNotFound', 'IncompleteStream',
     'NotRegistered', 'AlreadyRegistered', 'TimeoutError',
     'MaxRetriesExceededError', 'TaskRevokedError',
-    'InvalidTaskError', 'ChordError',
+    'InvalidTaskError', 'ChordError', 'NoQualifiedWorkerError',
 
     # Backend related errors.
     'BackendError', 'BackendGetMetaError', 'BackendStoreError',
@@ -258,6 +259,52 @@ class InvalidTaskError(TaskError):
 
 class ChordError(TaskError):
     """A task part of the chord raised an exception."""
+
+
+class NoQualifiedWorkerError(TaskError):
+    """No online worker satisfies all required task capabilities.
+
+    Raised when a task carrying required capability tags is published
+    while capability-based routing is enabled and none of the currently
+    known online workers declare all of the required tags.  The result
+    backend is also marked as :data:`~celery.states.FAILURE` with this
+    exception so that observers of the task id see a stable terminal
+    outcome instead of a task that stays pending forever.
+
+    Attributes:
+        task (str): Name of the task that could not be routed.
+        required (tuple[str, ...]): Sorted tuple of capability tags the
+            task required.
+        available (dict): Mapping of known online worker hostnames to
+            their sorted declared capability tags.
+    """
+
+    def __init__(self, task=None, required=(), available=None, message=None):
+        self.task = task
+        self.required = tuple(sorted(required or ()))
+        self.available = {
+            host: sorted(caps) for host, caps in (available or {}).items()
+        }
+        if message is None:
+            if self.available:
+                known = ', '.join(
+                    f'{host}: {caps}' for host, caps in sorted(self.available.items())
+                )
+            else:
+                known = 'no online workers reported'
+            message = (
+                f'No qualified worker for task {task!r}: none of the online '
+                f'workers declares all required capabilities '
+                f'{list(self.required)}. Known workers: {known}'
+            )
+        self.message = message
+        super().__init__(message)
+
+    def __reduce__(self):
+        return (
+            self.__class__,
+            (self.task, self.required, self.available, self.message),
+        )
 
 
 class CPendingDeprecationWarning(PendingDeprecationWarning):

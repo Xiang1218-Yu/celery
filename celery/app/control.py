@@ -387,8 +387,20 @@ class Inspect:
         """
         return self._request('conf', with_defaults=with_defaults)
 
-    def hello(self, from_node, revoked=None):
-        return self._request('hello', from_node=from_node, revoked=revoked)
+    def hello(self, from_node, revoked=None, capabilities=None):
+        return self._request('hello', from_node=from_node, revoked=revoked,
+                             capabilities=capabilities)
+
+    def capabilities(self):
+        """Return the capability tags declared by each online worker.
+
+        >>> app.control.inspect().capabilities()
+        {'celery@node1': {'ok': ['gpu', 'video']}}
+
+        Returns:
+            Dict: Dictionary ``{HOSTNAME: {'ok': [CAPABILITY, ...]}}``.
+        """
+        return self._request('capabilities')
 
     def memsample(self):
         """Return sample current RSS memory usage.
@@ -751,6 +763,38 @@ class Control:
         """
         return self.broadcast(
             'heartbeat', arguments={}, destination=destination, **kwargs)
+
+    def add_capability(self, capability, destination=None, **kwargs):
+        """Tell worker(s) to declare one or more capability tags.
+
+        Arguments:
+            capability (Union[str, List[str]]): Capability tag (or list
+                of tags) to add at runtime.
+
+        See Also:
+            Supports the same arguments as :meth:`broadcast`
+        """
+        if isinstance(capability, str):
+            capability = [capability]
+        return self.broadcast(
+            'add_capability', arguments={'capability': capability},
+            destination=destination, **kwargs)
+
+    def remove_capability(self, capability, destination=None, **kwargs):
+        """Tell worker(s) to stop declaring one or more capability tags.
+
+        Arguments:
+            capability (Union[str, List[str]]): Capability tag (or list
+                of tags) to remove at runtime.
+
+        See Also:
+            Supports the same arguments as :meth:`broadcast`
+        """
+        if isinstance(capability, str):
+            capability = [capability]
+        return self.broadcast(
+            'remove_capability', arguments={'capability': capability},
+            destination=destination, **kwargs)
 
     def broadcast(self, command, arguments=None, destination=None,
                   connection=None, reply=False, timeout=1.0, limit=None,

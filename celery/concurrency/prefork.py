@@ -79,6 +79,10 @@ def process_initializer(app, hostname):
                                       app=app)
     from celery.worker import state as worker_state
     worker_state.reset_state()
+    # Seed the capability view with this worker's own declared caps so
+    # that capability-aware publishing from pool children works even
+    # before the first gossip/inspect refresh.
+    app.capabilities.remember(hostname, worker_state.capabilities)
     signals.worker_process_init.send(sender=None)
 
 

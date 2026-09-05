@@ -167,6 +167,7 @@ class Gossip(bootsteps.ConsumerStep):
                 self.on_node_lost(worker)
         for worker in dirty:
             workers.pop(worker.hostname, None)
+            self.app.capabilities.forget(worker.hostname)
 
     def get_consumers(self, channel):
         self.register_timer()
@@ -202,5 +203,14 @@ class Gossip(bootsteps.ConsumerStep):
                 self.update_state(event)
             except (DecodeError, ContentDisallowed, TypeError) as exc:
                 logger.error(exc)
+            else:
+                # Keep the capability routing view in sync with the
+                # heartbeats exchanged between workers so that routing
+                # decisions do not have to query the control plane.
+                if event.get('type') == 'worker-offline':
+                    self.app.capabilities.forget(hostname)
+                elif 'capabilities' in event:
+                    self.app.capabilities.remember(
+                        hostname, event['capabilities'])
         else:
             self.clock.forward()
