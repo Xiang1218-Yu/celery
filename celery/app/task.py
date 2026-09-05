@@ -718,6 +718,71 @@ class Task:
                 **options
             )
 
+    def preview_async(self, args=None, kwargs=None, task_id=None,
+                      producer=None, link=None, link_error=None,
+                      shadow=None, **options):
+        """Preview the dispatch plan for :meth:`apply_async` without sending.
+
+        The ``producer`` argument is accepted for signature parity with
+        :meth:`apply_async` but has no effect: a preview never acquires
+        a producer.
+
+        Resolves and returns the final dispatch decision -- the queue,
+        exchange, routing key, serializer, compression, priority and
+        delivery mode that :meth:`apply_async` would use after merging
+        static routes, custom routers, task execution options and the
+        supplied explicit options -- using the exact same precedence and
+        defaults, but without publishing a message, emitting an event
+        or sending a signal. No task is executed, even when
+        :setting:`task_always_eager` is enabled.
+
+        Arguments:
+            args (Tuple): The positional arguments to pass on to the task.
+            kwargs (Dict): The keyword arguments to pass on to the task.
+            task_id (str): Optional task id used for the previewed message.
+
+        Returns:
+            celery.app.amqp.task_preview: The resolved dispatch plan.
+
+        Note:
+            Supports the same routing and publish keyword arguments as
+            :meth:`apply_async`. Repeated calls do not mutate the task's
+            execution options or the supplied options.
+        """
+        if self.soft_time_limit and self.time_limit and \
+                self.soft_time_limit > self.time_limit:
+            raise ValueError('soft_time_limit must be less than or equal to time_limit')
+
+        if self.typing:
+            try:
+                check_arguments = self.__header__
+            except AttributeError:  # pragma: no cover
+                pass
+            else:
+                check_arguments(*(args or ()), **(kwargs or {}))
+
+        if self.__v2_compat__:
+            shadow = shadow or self.shadow_name(self(), args, kwargs, options)
+        else:
+            shadow = shadow or self.shadow_name(args, kwargs, options)
+
+        preopts = self._get_exec_options()
+        # Always merge into a fresh mapping: preview must never mutate
+        # the cached execution options (or the caller's options).
+        options = dict(preopts, **options)
+
+        options.setdefault('ignore_result', self.ignore_result)
+        if self.priority:
+            options.setdefault('priority', self.priority)
+
+        app = self._get_app()
+        return app.preview_task(
+            self.name, args, kwargs, task_id=task_id,
+            link=link, link_error=link_error,
+            shadow=shadow, task_type=self,
+            **options
+        )
+
     def shadow_name(self, args, kwargs, options):
         """Override for custom task name in worker logs/monitoring.
 

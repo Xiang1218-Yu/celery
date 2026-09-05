@@ -849,40 +849,45 @@ class Celery:
             for pkg in fixup.autodiscover_tasks()
         ], related_name=related_name)
 
-    def send_task(self, name, args=None, kwargs=None, countdown=None,
-                  eta=None, task_id=None, producer=None, connection=None,
-                  router=None, result_cls=None, expires=_OMITTED,
-                  publisher=None, link=None, link_error=None,
-                  add_to_parent=True, group_id=None, group_index=None,
-                  retries=0, chord=None,
-                  reply_to=None, time_limit=_OMITTED, soft_time_limit=_OMITTED,
-                  root_id=None, parent_id=None, route_name=None,
-                  shadow=None, chain=None, task_type=None, replaced_task_nesting=0, **options):
-        """Send task by name.
+    def _prepare_task_message(
+            self, name, args=None, kwargs=None, countdown=None,
+            eta=None, task_id=None, router=None, expires=_OMITTED,
+            group_id=None, group_index=None, retries=0, chord=None,
+            reply_to=None, time_limit=_OMITTED, soft_time_limit=_OMITTED,
+            root_id=None, parent_id=None, route_name=None,
+            shadow=None, chain=None, task_type=None, replaced_task_nesting=0,
+            link=None, link_error=None, **options):
+        """Prepare a task message and its resolved publish options.
 
-        Supports the same arguments as :meth:`@-Task.apply_async`.
+        This is the side-effect-free preparation shared by
+        :meth:`send_task` (which then publishes) and
+        :meth:`preview_task` (which only returns the dispatch plan). It
+        performs task execution-option merging, routing, native delayed
+        delivery and expiration resolution with the exact same
+        precedence and defaults as a real send, but never acquires a
+        producer, publishes a message, emits an event or sends a
+        signal.
 
-        Arguments:
-            name (str): Name of task to call (e.g., `"tasks.add"`).
-            result_cls (AsyncResult): Specify custom result class.
+        Returns:
+            Tuple: ``(task_id, message, options, ignore_result)`` where
+            ``message`` is the built :class:`~celery.app.amqp.task_message`
+            and ``options`` the final publish options.
         """
-        parent = have_parent = None
         amqp = self.amqp
         task_id = task_id or uuid()
-        producer = producer or publisher  # XXX compat
         router = router or amqp.router
         conf = self.conf
         if conf.task_always_eager:  # pragma: no cover
             warnings.warn(AlwaysEagerIgnored(
                 'task_always_eager has no effect on send_task',
-            ), stacklevel=2)
+            ), stacklevel=3)
 
         # If the caller did not supply a task_type (i.e. a plain
         # send_task("name", ...) call), look it up in the local registry
         # and apply its execution options as defaults.  We intentionally
         # skip this when task_type was already provided (e.g. from
         # Task.apply_async) because apply_async already merged exec
-        # options — doing it again would override explicit caller values.
+        # options - doing it again would override explicit caller values.
         #
         # Use the underlying registry directly here so send_task() does not
         # auto-finalize the app (or raise when autofinalize=False) merely to
@@ -1025,6 +1030,40 @@ class Celery:
         for stamp in stamped_headers:
             options.pop(stamp)
 
+        return task_id, message, options, ignore_result
+
+    def send_task(self, name, args=None, kwargs=None, countdown=None,
+                  eta=None, task_id=None, producer=None, connection=None,
+                  router=None, result_cls=None, expires=_OMITTED,
+                  publisher=None, link=None, link_error=None,
+                  add_to_parent=True, group_id=None, group_index=None,
+                  retries=0, chord=None,
+                  reply_to=None, time_limit=_OMITTED, soft_time_limit=_OMITTED,
+                  root_id=None, parent_id=None, route_name=None,
+                  shadow=None, chain=None, task_type=None, replaced_task_nesting=0, **options):
+        """Send task by name.
+
+        Supports the same arguments as :meth:`@-Task.apply_async`.
+
+        Arguments:
+            name (str): Name of task to call (e.g., `"tasks.add"`).
+            result_cls (AsyncResult): Specify custom result class.
+        """
+        parent = have_parent = None
+        amqp = self.amqp
+        producer = producer or publisher  # XXX compat
+        task_id, message, options, ignore_result = self._prepare_task_message(
+            name, args=args, kwargs=kwargs, countdown=countdown, eta=eta,
+            task_id=task_id, router=router, expires=expires,
+            group_id=group_id, group_index=group_index, retries=retries,
+            chord=chord, reply_to=reply_to, time_limit=time_limit,
+            soft_time_limit=soft_time_limit, root_id=root_id,
+            parent_id=parent_id, route_name=route_name, shadow=shadow,
+            chain=chain, task_type=task_type,
+            replaced_task_nesting=replaced_task_nesting,
+            link=link, link_error=link_error, **options
+        )
+
         if connection:
             producer = amqp.Producer(connection, auto_declare=False)
 
@@ -1035,8 +1074,8 @@ class Celery:
                 amqp.send_task_message(P, name, message, **options)
         result = (result_cls or self.AsyncResult)(task_id)
         # We avoid using the constructor since a custom result class
-        # can be used, in which case the constructor may still use
-        # the old signature.
+        # can be used, in which case the constructor may still use the
+        # old signature.
         result.ignored = ignore_result
 
         if add_to_parent:
@@ -1045,6 +1084,59 @@ class Celery:
             if parent:
                 parent.add_trail(result)
         return result
+
+    def preview_task(self, name, args=None, kwargs=None, countdown=None,
+                     eta=None, task_id=None, producer=None, connection=None,
+                     router=None, result_cls=None, expires=_OMITTED,
+                     publisher=None, link=None, link_error=None,
+                     add_to_parent=True, group_id=None, group_index=None,
+                     retries=0, chord=None, reply_to=None,
+                     time_limit=_OMITTED, soft_time_limit=_OMITTED,
+                     root_id=None, parent_id=None, route_name=None,
+                     shadow=None, chain=None, task_type=None,
+                     replaced_task_nesting=0, **options):
+        """Preview the dispatch plan for a task without publishing it.
+
+        Supports the same arguments as :meth:`send_task` and resolves
+        them the exact same way -- task execution options, static
+        :setting:`task_routes`, custom routers, explicit ``queue`` /
+        ``exchange`` / ``routing_key`` / ``serializer`` / ``compression``
+        / ``priority`` / ``delivery_mode`` options, native delayed
+        delivery and expiration -- but never acquires a producer,
+        publishes a message, emits an event or sends a signal.
+
+        Arguments:
+            name (str): Name of task to call (e.g., ``"tasks.add"``).
+
+        Returns:
+            celery.app.amqp.task_preview: The resolved dispatch plan,
+            including the final queue, exchange, routing key,
+            serializer, compression, priority and delivery mode.
+
+        Note:
+            Repeated calls do not mutate the supplied options.
+
+            The ``producer``, ``publisher``, ``connection``,
+            ``result_cls`` and ``add_to_parent`` arguments are accepted
+            for signature parity with :meth:`send_task` but have no
+            effect: a preview never acquires a producer, publishes a
+            message, touches the result backend or trails the parent task.
+        """
+        # Shallow-copy: preparation merges routes and defaults into the
+        # options mapping, so preview must never work on caller data.
+        options = dict(options)
+        task_id, message, options, ignore_result = self._prepare_task_message(
+            name, args=args, kwargs=kwargs, countdown=countdown, eta=eta,
+            task_id=task_id, router=router, expires=expires,
+            group_id=group_id, group_index=group_index, retries=retries,
+            chord=chord, reply_to=reply_to, time_limit=time_limit,
+            soft_time_limit=soft_time_limit, root_id=root_id,
+            parent_id=parent_id, route_name=route_name, shadow=shadow,
+            chain=chain, task_type=task_type,
+            replaced_task_nesting=replaced_task_nesting,
+            link=link, link_error=link_error, **options
+        )
+        return self.amqp.preview_task_message(name, message, **options)
 
     def connection_for_read(self, url=None, **kwargs):
         """Establish connection used for consuming.

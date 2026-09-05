@@ -18,7 +18,7 @@ from celery.utils.time import maybe_make_aware
 
 from . import routes as _routes
 
-__all__ = ('AMQP', 'Queues', 'task_message')
+__all__ = ('AMQP', 'Queues', 'task_message', 'task_preview')
 
 #: earliest date supported by time.mktime.
 INT_MIN = -2147483648
@@ -31,6 +31,26 @@ key={0.routing_key}
 
 task_message = namedtuple('task_message',
                           ('headers', 'properties', 'body', 'sent_event'))
+
+#: Resolved publish decision for a task message, shared by the actual
+#: sender and the dispatch-plan preview. Internal, not part of the
+#: public API.
+task_message_resolution = namedtuple('task_message_resolution', (
+    'name', 'body', 'headers', 'properties', 'sent_event',
+    'queue', 'queue_name', 'exchange', 'routing_key', 'exchange_type',
+    'serializer', 'compression', 'delivery_mode', 'declare',
+    'retry', 'retry_policy', 'timeout', 'confirm_timeout',
+))
+
+#: Public dispatch plan returned by :meth:`AMQP.preview_task_message`,
+#: :meth:`celery.Celery.preview_task` and
+#: :meth:`celery.Task.preview_async`.
+task_preview = namedtuple('task_preview', (
+    'task', 'id', 'queue', 'exchange', 'routing_key',
+    'serializer', 'compression', 'priority', 'delivery_mode',
+    'exchange_type', 'declare', 'retry', 'retry_policy',
+    'headers', 'properties', 'body',
+))
 
 
 def utf8dict(d, encoding='utf-8'):
@@ -267,8 +287,26 @@ class AMQP:
         return self.task_protocols[self.app.conf.task_protocol]
 
     @cached_property
-    def send_task_message(self):
+    def _task_message_senders(self):
+        # (sender, previewer) pair built together so they share the same
+        # captured defaults and resolution logic.
         return self._create_task_sender()
+
+    @cached_property
+    def send_task_message(self):
+        return self._task_message_senders[0]
+
+    @cached_property
+    def preview_task_message(self):
+        """Dispatch-plan preview counterpart of :meth:`send_task_message`.
+
+        Returns a :class:`task_preview` describing the final queue,
+        exchange, routing key, serializer, compression, priority and
+        delivery mode, without publishing a message or emitting any
+        signal or event. See :meth:`celery.Celery.preview_task` and
+        :meth:`celery.Task.preview_async`.
+        """
+        return self._task_message_senders[1]
 
     def Queues(self, queues, create_missing=None, create_missing_queue_type=None,
                create_missing_queue_exchange_type=None, autoexchange=None, max_priority=None):
@@ -503,14 +541,23 @@ class AMQP:
         default_serializer = self.app.conf.task_serializer
         default_compressor = self.app.conf.task_compression
 
-        def send_task_message(producer, name, message,
-                              exchange=None, routing_key=None, queue=None,
-                              event_dispatcher=None,
-                              retry=None, retry_policy=None,
-                              serializer=None, delivery_mode=None,
-                              compression=None, declare=None,
-                              headers=None, exchange_type=None,
-                              timeout=None, confirm_timeout=None, **kwargs):
+        def resolve_task_message(
+                name, message,
+                exchange=None, routing_key=None, queue=None,
+                retry=None, retry_policy=None,
+                serializer=None, delivery_mode=None,
+                compression=None, declare=None,
+                headers=None, exchange_type=None,
+                timeout=None, confirm_timeout=None, **kwargs):
+            """Resolve the final publish decision for a task message.
+
+            Shared by the actual sender (:func:`send_task_message`) and
+            the dispatch-plan preview (:func:`preview_task_message`). It
+            applies the exact same queue/exchange/routing-key resolution,
+            default merging and retry-policy preparation as a real
+            publish, but never publishes a message, emits an event or
+            sends a signal.
+            """
             retry = default_retry if retry is None else retry
             headers2, properties, body, sent_event = message
             if headers:
@@ -552,58 +599,150 @@ class AMQP:
 
             # merge default and custom policy
             retry = default_retry if retry is None else retry
-            _rp = (dict(default_policy, **retry_policy) if retry_policy
-                   else default_policy)
+            retry_policy = (dict(default_policy, **retry_policy) if retry_policy
+                            else default_policy)
 
-            if before_receivers:
-                send_before_publish(
-                    sender=name, body=body,
-                    exchange=exchange, routing_key=routing_key,
-                    declare=declare, headers=headers2,
-                    properties=properties, retry_policy=retry_policy,
-                )
-            ret = producer.publish(
-                body,
-                exchange=exchange,
-                routing_key=routing_key,
+            return task_message_resolution(
+                name=name, body=body, headers=headers2, properties=properties,
+                sent_event=sent_event, queue=queue, queue_name=qname,
+                exchange=exchange, routing_key=routing_key,
+                exchange_type=exchange_type,
                 serializer=serializer or default_serializer,
                 compression=compression or default_compressor,
-                retry=retry, retry_policy=_rp,
                 delivery_mode=delivery_mode, declare=declare,
-                headers=headers2,
+                retry=retry, retry_policy=retry_policy,
                 timeout=timeout, confirm_timeout=confirm_timeout,
-                **properties
+            )
+
+        def send_task_message(producer, name, message,
+                              exchange=None, routing_key=None, queue=None,
+                              event_dispatcher=None,
+                              retry=None, retry_policy=None,
+                              serializer=None, delivery_mode=None,
+                              compression=None, declare=None,
+                              headers=None, exchange_type=None,
+                              timeout=None, confirm_timeout=None, **kwargs):
+            decision = resolve_task_message(
+                name, message,
+                exchange=exchange, routing_key=routing_key, queue=queue,
+                retry=retry, retry_policy=retry_policy,
+                serializer=serializer, delivery_mode=delivery_mode,
+                compression=compression, declare=declare,
+                headers=headers, exchange_type=exchange_type,
+                timeout=timeout, confirm_timeout=confirm_timeout,
+                **kwargs
+            )
+            if before_receivers:
+                send_before_publish(
+                    sender=name, body=decision.body,
+                    exchange=decision.exchange, routing_key=decision.routing_key,
+                    declare=decision.declare, headers=decision.headers,
+                    properties=decision.properties, retry_policy=retry_policy,
+                )
+            ret = producer.publish(
+                decision.body,
+                exchange=decision.exchange,
+                routing_key=decision.routing_key,
+                serializer=decision.serializer,
+                compression=decision.compression,
+                retry=decision.retry, retry_policy=decision.retry_policy,
+                delivery_mode=decision.delivery_mode, declare=decision.declare,
+                headers=decision.headers,
+                timeout=decision.timeout,
+                confirm_timeout=decision.confirm_timeout,
+                **decision.properties
             )
             if after_receivers:
-                send_after_publish(sender=name, body=body, headers=headers2,
-                                   exchange=exchange, routing_key=routing_key)
+                send_after_publish(sender=name, body=decision.body,
+                                   headers=decision.headers,
+                                   exchange=decision.exchange,
+                                   routing_key=decision.routing_key)
             if sent_receivers:  # XXX deprecated
-                if isinstance(body, tuple):  # protocol version 2
+                if isinstance(decision.body, tuple):  # protocol version 2
                     send_task_sent(
-                        sender=name, task_id=headers2['id'], task=name,
-                        args=body[0], kwargs=body[1],
-                        eta=headers2['eta'], taskset=headers2['group'],
+                        sender=name, task_id=decision.headers['id'], task=name,
+                        args=decision.body[0], kwargs=decision.body[1],
+                        eta=decision.headers['eta'],
+                        taskset=decision.headers['group'],
                     )
                 else:  # protocol version 1
                     send_task_sent(
-                        sender=name, task_id=body['id'], task=name,
-                        args=body['args'], kwargs=body['kwargs'],
-                        eta=body['eta'], taskset=body['taskset'],
+                        sender=name, task_id=decision.body['id'], task=name,
+                        args=decision.body['args'],
+                        kwargs=decision.body['kwargs'],
+                        eta=decision.body['eta'],
+                        taskset=decision.body['taskset'],
                     )
-            if sent_event:
+            if decision.sent_event:
                 evd = event_dispatcher or default_evd
-                exname = exchange
+                exname = decision.exchange
                 if isinstance(exname, Exchange):
                     exname = exname.name
-                sent_event.update({
-                    'queue': qname,
+                decision.sent_event.update({
+                    'queue': decision.queue_name,
                     'exchange': exname,
-                    'routing_key': routing_key,
+                    'routing_key': decision.routing_key,
                 })
-                evd.publish('task-sent', sent_event,
-                            producer, retry=retry, retry_policy=retry_policy)
+                evd.publish('task-sent', decision.sent_event,
+                            producer, retry=decision.retry,
+                            retry_policy=retry_policy)
             return ret
-        return send_task_message
+
+        def preview_task_message(name, message,
+                                 exchange=None, routing_key=None, queue=None,
+                                 event_dispatcher=None,
+                                 retry=None, retry_policy=None,
+                                 serializer=None, delivery_mode=None,
+                                 compression=None, declare=None,
+                                 headers=None, exchange_type=None,
+                                 timeout=None, confirm_timeout=None, **kwargs):
+            """Return the dispatch plan for a task message without publishing.
+
+            Uses the exact same resolution logic and defaults as
+            :func:`send_task_message`, but never publishes a message,
+            emits a ``task-sent`` event or sends any publish signal.
+            """
+            decision = resolve_task_message(
+                name, message,
+                exchange=exchange, routing_key=routing_key, queue=queue,
+                retry=retry, retry_policy=retry_policy,
+                serializer=serializer, delivery_mode=delivery_mode,
+                compression=compression, declare=declare,
+                headers=headers, exchange_type=exchange_type,
+                timeout=timeout, confirm_timeout=confirm_timeout,
+                **kwargs
+            )
+            exchange_name = decision.exchange
+            if isinstance(exchange_name, Exchange):
+                exchange_name = exchange_name.name
+            task_id = decision.headers.get('id')
+            if task_id is None and isinstance(decision.body, dict):
+                # protocol version 1 carries the task id in the body.
+                task_id = decision.body.get('id')
+            declare = tuple(
+                entity.name if hasattr(entity, 'name') else entity
+                for entity in (decision.declare or ())
+            )
+            return task_preview(
+                task=name,
+                id=task_id,
+                queue=decision.queue_name,
+                exchange=exchange_name,
+                routing_key=decision.routing_key,
+                serializer=decision.serializer,
+                compression=decision.compression,
+                priority=decision.properties.get('priority'),
+                delivery_mode=decision.delivery_mode,
+                exchange_type=decision.exchange_type,
+                declare=declare,
+                retry=decision.retry,
+                retry_policy=decision.retry_policy,
+                headers=decision.headers,
+                properties=decision.properties,
+                body=decision.body,
+            )
+
+        return send_task_message, preview_task_message
 
     @cached_property
     def default_queue(self):

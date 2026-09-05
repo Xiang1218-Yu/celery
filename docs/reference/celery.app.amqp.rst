@@ -42,6 +42,7 @@
 
         .. autoattribute:: create_task_message
         .. autoattribute:: send_task_message
+        .. autoattribute:: preview_task_message
         .. autoattribute:: default_queue
         .. autoattribute:: default_exchange
         .. autoattribute:: producer_pool

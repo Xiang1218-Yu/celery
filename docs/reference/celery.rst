@@ -80,6 +80,8 @@ and creating Celery applications.
 
     .. automethod:: send_task
 
+    .. automethod:: preview_task
+
     .. automethod:: gen_task_name
 
     .. autoattribute:: AsyncResult

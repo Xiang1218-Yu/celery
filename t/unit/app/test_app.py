@@ -2207,6 +2207,133 @@ class test_App:
         # Should still send, just without native delayed delivery routing
         self.app.amqp.send_task_message.assert_called_once()
 
+    def test_preview_task_returns_resolved_plan(self):
+        plan = self.app.preview_task('foo', (1, 2))
+        assert plan.task == 'foo'
+        assert plan.id
+        assert plan.queue == 'testcelery'
+        # the default queue is a direct queue -> anonymous exchange,
+        # routing key defaults to the queue name
+        assert plan.exchange == ''
+        assert plan.routing_key == 'testcelery'
+        assert plan.serializer == self.app.conf.task_serializer
+        assert plan.delivery_mode == self.app.conf.task_default_delivery_mode
+
+    def test_preview_task_does_not_publish_or_touch_backend(self):
+        with patch.object(self.app.amqp, 'send_task_message') as send_message, \
+                patch.object(self.app, 'producer_or_acquire') as acquire, \
+                patch.object(self.app.backend, 'on_task_call') as on_call:
+            plan = self.app.preview_task('foo', (1, 2))
+            send_message.assert_not_called()
+            acquire.assert_not_called()
+            on_call.assert_not_called()
+        assert plan.queue == 'testcelery'
+
+    def test_preview_task_does_not_emit_publish_signals(self):
+        from celery import signals
+
+        fired = []
+        receivers = [
+            signals.before_task_publish.connect(
+                lambda **kw: fired.append('before')),
+            signals.after_task_publish.connect(
+                lambda **kw: fired.append('after')),
+        ]
+        try:
+            self.app.preview_task('foo', (1, 2))
+        finally:
+            signals.before_task_publish.disconnect(receivers[0])
+            signals.after_task_publish.disconnect(receivers[1])
+        assert fired == []
+
+    def test_preview_task_applies_static_routes(self):
+        self.app.amqp.queues.add(
+            Queue('video', Exchange('media', 'topic'),
+                  routing_key='video.#'),
+        )
+        self.app.conf.task_routes = {
+            'tasks.video_encode': {
+                'queue': 'video',
+                'routing_key': 'video.encode',
+                'compression': 'gzip',
+            },
+        }
+        plan = self.app.preview_task('tasks.video_encode', ())
+        assert plan.queue == 'video'
+        assert plan.exchange == 'media'
+        assert plan.routing_key == 'video.encode'
+        assert plan.compression == 'gzip'
+
+    def test_preview_task_explicit_options_override_route(self):
+        self.app.amqp.queues.add(
+            Queue('video', Exchange('media', 'topic'),
+                  routing_key='video.#'),
+        )
+        self.app.conf.task_routes = {
+            'tasks.video_encode': {
+                'queue': 'video',
+                'routing_key': 'video.encode',
+                'serializer': 'json',
+            },
+        }
+        plan = self.app.preview_task(
+            'tasks.video_encode', (),
+            queue='testcelery', serializer='pickle', priority=9,
+        )
+        assert plan.queue == 'testcelery'
+        assert plan.routing_key == 'testcelery'
+        assert plan.serializer == 'pickle'
+        assert plan.priority == 9
+
+    def test_preview_task_honours_registered_task_options(self):
+        @self.app.task(name='tasks.preview_with_serializer', serializer='json')
+        def test_task():
+            pass
+
+        self.app.finalize()
+        self.app.conf.task_serializer = 'pickle'
+
+        plan = self.app.preview_task('tasks.preview_with_serializer', ())
+        assert plan.serializer == 'json'
+
+    def test_preview_task_does_not_mutate_caller_options(self):
+        import copy
+
+        options = {'queue': 'testcelery', 'priority': 3,
+                   'headers': {'x': 1}, 'serializer': 'json'}
+        snapshot = copy.deepcopy(options)
+        first = self.app.preview_task('foo', (), **options)
+        second = self.app.preview_task('foo', (), **options)
+        assert options == snapshot
+        assert (first.queue, first.routing_key, first.priority) == \
+            (second.queue, second.routing_key, second.priority)
+
+    def test_preview_task_matches_send_task_publish_decision(self):
+        producer = MagicMock(name='producer')
+        self.app.send_task(
+            'foo', (1, 2), producer=producer,
+            queue='testcelery', priority=4, retry=False,
+        )
+        pub = producer.publish.call_args[1]
+
+        plan = self.app.preview_task(
+            'foo', (1, 2),
+            queue='testcelery', priority=4, retry=False,
+        )
+        assert pub['exchange'] == plan.exchange
+        assert pub['routing_key'] == plan.routing_key
+        assert pub['serializer'] == plan.serializer
+        assert pub['compression'] == plan.compression
+        assert pub['delivery_mode'] == plan.delivery_mode
+        assert pub['priority'] == plan.priority == 4
+        assert [q.name for q in pub['declare']] == list(plan.declare)
+
+    def test_preview_task_with_countdown_does_not_open_connection(self):
+        with patch.object(self.app, 'producer_or_acquire') as acquire:
+            plan = self.app.preview_task('foo', (), countdown=60)
+            acquire.assert_not_called()
+        assert plan.headers['eta'] is not None
+
 
 class test_defaults:
 

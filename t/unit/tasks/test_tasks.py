@@ -1912,3 +1912,119 @@ class test_apply_async(TasksCase):
                 *expected_args,
                 **expected_kwargs
             )
+
+
+class test_preview_async(TasksCase):
+
+    def test_preview_async_returns_resolved_plan(self):
+        plan = self.mytask.preview_async((1, 2))
+        assert plan.task == self.mytask.name
+        assert plan.id
+        assert plan.queue == 'testcelery'
+        assert plan.exchange == ''
+        assert plan.routing_key == 'testcelery'
+        assert plan.serializer == self.app.conf.task_serializer
+        assert plan.delivery_mode == self.app.conf.task_default_delivery_mode
+
+    def test_preview_async_uses_task_execution_options(self):
+        @self.app.task(name='tasks.preview_exec_opts',
+                       serializer='pickle', priority=7)
+        def task(x):
+            return x
+
+        plan = task.preview_async((1,))
+        assert plan.serializer == 'pickle'
+        assert plan.priority == 7
+
+    def test_preview_async_explicit_options_override_task_options(self):
+        @self.app.task(name='tasks.preview_explicit', serializer='json',
+                       priority=7)
+        def task(x):
+            return x
+
+        plan = task.preview_async((1,), serializer='pickle', priority=2)
+        assert plan.serializer == 'pickle'
+        assert plan.priority == 2
+
+    def test_preview_async_applies_static_routes(self):
+        @self.app.task(name='tasks.preview_routed')
+        def task(x):
+            return x
+
+        self.app.conf.task_routes = {
+            'tasks.preview_routed': {
+                'queue': 'testcelery',
+                'compression': 'gzip',
+            },
+        }
+        plan = task.preview_async((1,))
+        assert plan.queue == 'testcelery'
+        assert plan.compression == 'gzip'
+
+    def test_preview_async_does_not_publish_or_execute_even_when_eager(self):
+        executed = []
+
+        @self.app.task(name='tasks.preview_no_execute')
+        def side_effect_task():
+            executed.append(True)
+            return 1
+
+        self.app.conf.task_always_eager = True
+        try:
+            with patch.object(self.app, 'send_task') as send_task, \
+                    patch.object(self.app, 'preview_task',
+                                 wraps=self.app.preview_task) as preview_task:
+                plan = side_effect_task.preview_async()
+                send_task.assert_not_called()
+                preview_task.assert_called_once()
+                assert preview_task.call_args[0][0] == \
+                    'tasks.preview_no_execute'
+                # the decorator returns a lazy PromiseProxy; the task_type
+                # passed through must be the resolved Task instance
+                assert preview_task.call_args[1]['task_type'] is \
+                    side_effect_task._get_current_object()
+        finally:
+            self.app.conf.task_always_eager = False
+
+        assert executed == []
+        assert plan.queue == 'testcelery'
+
+    def test_preview_async_does_not_mutate_caller_or_task_options(self):
+        import copy
+
+        @self.app.task(name='tasks.preview_no_mutation',
+                       serializer='json', priority=5, queue='testcelery')
+        def task(x):
+            return x
+
+        # populate the cached execution options, then snapshot them
+        task.preview_async((1,))
+        exec_before = dict(task._get_exec_options())
+
+        options = {'priority': 9, 'headers': {'k': 'v'}}
+        snapshot = copy.deepcopy(options)
+        first = task.preview_async((1,), **options)
+        second = task.preview_async((1,), **options)
+
+        assert options == snapshot
+        assert task._get_exec_options() == exec_before
+        # the cached task-level queue must stay a string, not be replaced
+        # by a resolved Queue object as a real send would do
+        assert exec_before['queue'] == 'testcelery'
+        assert (first.queue, first.priority, first.serializer) == \
+            (second.queue, second.priority, second.serializer) == \
+            ('testcelery', 9, 'json')
+
+    def test_preview_async_matches_apply_async_publish_decision(self):
+        producer = MagicMock(name='producer')
+        self.mytask.apply_async((1, 2), producer=producer, priority=4,
+                                retry=False)
+        pub = producer.publish.call_args[1]
+
+        plan = self.mytask.preview_async((1, 2), priority=4, retry=False)
+        assert pub['exchange'] == plan.exchange
+        assert pub['routing_key'] == plan.routing_key
+        assert pub['serializer'] == plan.serializer
+        assert pub['compression'] == plan.compression
+        assert pub['delivery_mode'] == plan.delivery_mode
+        assert pub['priority'] == plan.priority == 4

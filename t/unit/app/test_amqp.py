@@ -472,6 +472,134 @@ class test_AMQP(test_AMQP_Base):
         assert q.exchange.type == "topic"
 
 
+class test_preview_task_message(test_AMQP_Base):
+
+    def test_returns_resolved_plan_for_queue_string(self):
+        plan = self.app.amqp.preview_task_message(
+            'foo', self.simple_message_no_sent_event,
+            queue='foo', retry=False,
+        )
+        assert plan.task == 'foo'
+        assert plan.id == self.simple_message_no_sent_event.headers['id']
+        assert plan.queue == 'foo'
+        # direct queues resolve to the anonymous exchange and rkey=queue
+        assert plan.exchange == ''
+        assert plan.routing_key == 'foo'
+        assert plan.exchange_type == 'direct'
+        assert plan.serializer == self.app.conf.task_serializer
+        assert plan.compression == self.app.conf.task_compression
+        assert plan.delivery_mode == self.app.conf.task_default_delivery_mode
+        assert plan.retry is False
+        assert 'foo' in plan.declare
+
+    def test_matches_publish_decision(self):
+        prod = Mock(name='producer')
+        opts = dict(queue='foo', retry=False, priority=4,
+                    serializer='json', delivery_mode=2)
+        self.app.amqp.send_task_message(
+            prod, 'foo', self.simple_message_no_sent_event, **opts,
+        )
+        pub = prod.publish.call_args[1]
+
+        plan = self.app.amqp.preview_task_message(
+            'foo', self.simple_message_no_sent_event, **opts,
+        )
+        assert pub['exchange'] == plan.exchange
+        assert pub['routing_key'] == plan.routing_key
+        assert pub['serializer'] == plan.serializer
+        assert pub['compression'] == plan.compression
+        assert pub['delivery_mode'] == plan.delivery_mode
+        assert pub['priority'] == plan.priority == 4
+        assert [q.name for q in pub['declare']] == list(plan.declare)
+        assert pub['headers'] is plan.headers
+        assert pub['retry_policy'] == plan.retry_policy
+
+    def test_topic_queue_keeps_exchange_and_routing_key(self):
+        self.app.amqp.queues.add(
+            Queue('video', Exchange('media', 'topic'), routing_key='video.#'),
+        )
+        plan = self.app.amqp.preview_task_message(
+            'foo', self.simple_message_no_sent_event,
+            queue='video', retry=False,
+        )
+        assert plan.queue == 'video'
+        assert plan.exchange == 'media'
+        assert plan.routing_key == 'video.#'
+        assert plan.exchange_type == 'topic'
+
+    def test_explicit_exchange_and_routing_key_win(self):
+        plan = self.app.amqp.preview_task_message(
+            'foo', self.simple_message_no_sent_event,
+            queue='foo', exchange='custom-ex', routing_key='custom.key',
+            retry=False,
+        )
+        assert plan.exchange == 'custom-ex'
+        assert plan.routing_key == 'custom.key'
+
+    def test_exchange_object_is_normalized_to_name(self):
+        # native delayed delivery passes an Exchange instance as exchange
+        plan = self.app.amqp.preview_task_message(
+            'foo', self.simple_message_no_sent_event,
+            exchange=Exchange('celery_delayed_27', type='topic'),
+            routing_key='routing-key', retry=False,
+        )
+        assert plan.exchange == 'celery_delayed_27'
+        assert plan.routing_key == 'routing-key'
+        assert plan.queue is None
+
+    def test_delivery_mode_from_exchange(self):
+        q = Queue('dm', exchange=Exchange('dm', delivery_mode=1))
+        self.app.amqp.queues.add(q)
+        plan = self.app.amqp.preview_task_message(
+            'foo', self.simple_message_no_sent_event,
+            queue='dm', retry=False,
+        )
+        assert plan.delivery_mode == 1
+
+    def test_protocol_v1_id_taken_from_body(self):
+        message = self.app.amqp.as_task_v1(uuid(), 'foo')
+        plan = self.app.amqp.preview_task_message(
+            'foo', message, queue='foo', retry=False,
+        )
+        assert plan.id == message.body['id']
+
+    def test_does_not_publish_or_emit_signals_or_events(self):
+        from celery import signals
+
+        fired = []
+        receivers = [
+            signals.before_task_publish.connect(lambda **kw: fired.append('before')),
+            signals.after_task_publish.connect(lambda **kw: fired.append('after')),
+            signals.task_sent.connect(lambda **kw: fired.append('sent')),
+        ]
+        try:
+            evd = Mock(name='event_dispatcher')
+            plan = self.app.amqp.preview_task_message(
+                'foo', self.simple_message, queue='foo', retry=False,
+                event_dispatcher=evd,
+            )
+            assert fired == []
+            evd.publish.assert_not_called()
+        finally:
+            signals.before_task_publish.disconnect(receivers[0])
+            signals.after_task_publish.disconnect(receivers[1])
+            signals.task_sent.disconnect(receivers[2])
+        assert plan.exchange == ''
+
+    def test_repeated_preview_is_stable(self):
+        message = self.app.amqp.as_task_v2(uuid(), 'foo')
+        first = self.app.amqp.preview_task_message(
+            'foo', message, queue='foo', retry=False, priority=3,
+        )
+        second = self.app.amqp.preview_task_message(
+            'foo', message, queue='foo', retry=False, priority=3,
+        )
+        assert (first.queue, first.exchange, first.routing_key,
+                first.priority, first.serializer) == \
+            (second.queue, second.exchange, second.routing_key,
+             second.priority, second.serializer)
+
+
 class test_as_task_v2(test_AMQP_Base):
 
     def test_raises_if_args_is_not_tuple(self):
