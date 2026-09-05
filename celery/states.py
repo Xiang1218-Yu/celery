@@ -56,6 +56,12 @@ __all__ = (
     'PENDING', 'RECEIVED', 'STARTED', 'SUCCESS', 'FAILURE',
     'REVOKED', 'RETRY', 'IGNORED', 'READY_STATES', 'UNREADY_STATES',
     'EXCEPTION_STATES', 'PROPAGATE_STATES', 'precedence', 'state',
+    # Saga (compensation workflow) states
+    'SAGA_RUNNING', 'SAGA_COMPENSATING', 'SAGA_SUCCEEDED',
+    'STEP_DONE', 'STEP_SKIPPED',
+    'PENDING_COMPENSATION', 'COMPENSATING', 'COMPENSATED',
+    'COMPENSATION_FAILED',
+    'SAGA_STATES', 'SAGA_TERMINAL_STATES', 'COMPENSATION_TERMINAL_STATES',
 )
 
 #: State precedence.
@@ -149,3 +155,45 @@ PROPAGATE_STATES = frozenset({FAILURE, REVOKED})
 ALL_STATES = frozenset({
     PENDING, RECEIVED, STARTED, SUCCESS, FAILURE, RETRY, REVOKED,
 })
+
+
+# --- Saga (compensation workflow) states ---------------------------------
+
+#: Saga forward flow is still running (no failure observed yet).
+SAGA_RUNNING = 'SAGA_RUNNING'
+#: Saga forward flow failed and compensations are being dispatched.
+SAGA_COMPENSATING = 'SAGA_COMPENSATING'
+#: Saga forward flow completed successfully; no compensation needed.
+SAGA_SUCCEEDED = 'SAGA_SUCCEEDED'
+
+#: Forward step completed successfully (its compensation is not yet needed).
+STEP_DONE = 'DONE'
+#: Forward step never completed (did not run or failed before commit);
+#: it has no side effects that need compensating.
+STEP_SKIPPED = 'SKIPPED'
+
+#: Forward step completed and its compensation still has to run
+#: ("still awaiting compensation" / 仍待补偿).
+PENDING_COMPENSATION = 'PENDING_COMPENSATION'
+#: The compensation for this step is currently running.
+COMPENSATING = 'COMPENSATING'
+#: The step has been compensated successfully (已补偿).
+COMPENSATED = 'COMPENSATED'
+#: The compensation for this step failed (补偿失败). This is a stable
+#: terminal state; the saga can be resumed to retry the compensation.
+COMPENSATION_FAILED = 'COMPENSATION_FAILED'
+
+#: All states a saga document may be in.
+SAGA_STATES = frozenset({
+    SAGA_RUNNING, SAGA_COMPENSATING, SAGA_SUCCEEDED,
+    COMPENSATED, COMPENSATION_FAILED,
+})
+
+#: Saga states that will not transition any further without an explicit
+#: resume request.
+SAGA_TERMINAL_STATES = frozenset({
+    SAGA_SUCCEEDED, COMPENSATED, COMPENSATION_FAILED,
+})
+
+#: Stable terminal states for an individual step compensation result.
+COMPENSATION_TERMINAL_STATES = frozenset({COMPENSATED, COMPENSATION_FAILED})

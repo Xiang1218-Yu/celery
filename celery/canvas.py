@@ -459,13 +459,17 @@ class Signature(dict):
             args, kwargs, opts = self._merge(args, kwargs, opts)
         else:
             args, kwargs, opts = self.args, self.kwargs, self.options
-        signature = Signature.from_dict({'task': self.task,
-                                         'args': tuple(args),
-                                         'kwargs': kwargs,
-                                         'options': deepcopy(opts),
-                                         'subtask_type': self.subtask_type,
-                                         'immutable': self.immutable},
-                                        app=self._app)
+        signature_dict = {'task': self.task,
+                          'args': tuple(args),
+                          'kwargs': kwargs,
+                          'options': deepcopy(opts),
+                          'subtask_type': self.subtask_type,
+                          'immutable': self.immutable}
+        # Carry the saga compensation signature only when attached, so
+        # plain signatures serialize exactly as before.
+        if self.get('compensation') is not None:
+            signature_dict['compensation'] = self.get('compensation')
+        signature = Signature.from_dict(signature_dict, app=self._app)
         signature._type = self._type
         return signature
 
@@ -744,6 +748,39 @@ class Signature(dict):
         reverse is true for :meth:`link_error`.
         """
         self.link_error(errback)
+        return self
+
+    def on_compensation(self, compensation):
+        """Attach a serializable compensation signature to this step.
+
+        The compensation is run (in reverse completion order) by a
+        :class:`~celery.saga` workflow when a later step fails and the
+        forward flow has to be rolled back.
+
+        Compensation signatures can only be attached to leaf task
+        signatures -- not to :class:`chain`, :class:`group` or
+        :class:`chord` primitives.
+
+        Arguments:
+            compensation (Signature): The signature to invoke to undo the
+                side effects of this step. Pass :const:`None` to remove a
+                previously attached compensation.
+
+        Returns:
+            Signature: the signature itself, so calls can be chained.
+        """
+        if isinstance(self, (_chain, group, _chord)):
+            raise TypeError(
+                'Compensation can only be attached to individual task '
+                'signatures (leaf steps), not to chain/group/chord '
+                'primitives.')
+        if compensation is None:
+            self.pop('compensation', None)
+            return self
+        compensation = maybe_signature(compensation, app=self._app)
+        # Store as a plain dict so the compensation survives any
+        # serializer (json/pickle/...) together with the step signature.
+        self['compensation'] = dict(compensation)
         return self
 
     def flatten_links(self):
@@ -1027,8 +1064,9 @@ class _chain(Signature):
         # Clone chain's tasks assigning signatures from link_error
         # to each task and adding the chain's links to the last task.
         tasks = [t.clone() for t in self.tasks]
-        for sig in maybe_list(self.options.get('link')) or []:
-            tasks[-1].link(sig)
+        if tasks:
+            for sig in maybe_list(self.options.get('link')) or []:
+                tasks[-1].link(sig)
         for sig in maybe_list(self.options.get('link_error')) or []:
             for task in tasks:
                 task.link_error(sig)

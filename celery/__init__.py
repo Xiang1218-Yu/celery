@@ -37,7 +37,7 @@ __keywords__ = 'task job queue distributed messaging actor'
 __all__ = (
     'Celery', 'bugreport', 'shared_task', 'Task',
     'current_app', 'current_task', 'maybe_signature',
-    'chain', 'chord', 'chunks', 'group', 'signature',
+    'chain', 'chord', 'chunks', 'group', 'saga', 'signature',
     'xmap', 'xstarmap', 'uuid',
 )
 
@@ -75,6 +75,7 @@ if TYPE_CHECKING:
     from celery.app.utils import bugreport
     from celery.canvas import (chain, chord, chunks, group, maybe_signature, signature, subtask, xmap,  # noqa
                                xstarmap)
+    from celery.saga import saga  # noqa
     from celery.utils import uuid
 
 # Eventlet/gevent patching must happen before importing
@@ -161,6 +162,7 @@ old_module, new_module = local.recreate_module(  # pragma: no cover
             'signature', 'maybe_signature', 'subtask',
             'xmap', 'xstarmap',
         ],
+        'celery.saga': ['saga', 'get_saga_state', 'resume_saga'],
         'celery.utils': ['uuid'],
     },
     __package__='celery', __file__=__file__,

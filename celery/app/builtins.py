@@ -183,3 +183,54 @@ def add_chord_task(app):
         return ch.run(header, body, partial_args, app, interval,
                       countdown, max_retries, **kwargs)
     return chord
+
+
+@connect_on_app_finalize
+def add_saga_tasks(app):
+    """Built-in tasks backing the compensation (saga) canvas workflow."""
+    import sys
+
+    import celery.saga  # noqa: F401 - ensure the module is imported
+
+    def saga_mod():
+        # Resolve via sys.modules: ``from celery import saga`` may resolve
+        # to the canvas primitive class instead of the module.
+        return sys.modules['celery.saga']
+
+    @app.task(name='celery.saga.mark_done', shared=False, lazy=False,
+              ignore_result=True)
+    def saga_mark_done(payload):
+        """Record that a forward saga step completed successfully."""
+        return saga_mod().mark_step_done(app, payload)
+
+    @app.task(name='celery.saga.succeed', shared=False, lazy=False,
+              ignore_result=True)
+    def saga_succeed(payload):
+        """Mark the saga as succeeded once all forward steps completed."""
+        return saga_mod().mark_saga_succeeded(app, payload)
+
+    @app.task(name='celery.saga.mark_comp', shared=False, lazy=False,
+              ignore_result=True)
+    def saga_mark_comp(payload):
+        """Record the terminal result of a single compensation."""
+        return saga_mod().mark_compensation_result(app, payload)
+
+    @app.task(name='celery.saga.compensate', bind=True, shared=False,
+              lazy=False, ignore_result=True, max_retries=None,
+              default_retry_delay=1.0)
+    def saga_compensate(self, payload):
+        """Coordinator: dispatch compensations in reverse completion order.
+
+        Idempotent and restart-safe; retries itself while steps are still
+        in flight and can be re-applied at any time to resume a saga.
+        """
+        mod = saga_mod()
+        saga_id = payload['saga_id']
+        try:
+            return mod.run_compensation(app, saga_id)
+        except mod.SagaCompensationDeferred:
+            raise self.retry(
+                countdown=app.conf.result_chord_retry_interval or 1.0,
+                max_retries=None,
+            )
+    return saga_compensate
