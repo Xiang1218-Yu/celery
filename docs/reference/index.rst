@@ -50,6 +50,7 @@
     celery.events.receiver
     celery.events.dispatcher
     celery.events.event
+    celery.events.journal
     celery.events.state
     celery.beat
     celery.apps.worker

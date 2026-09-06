@@ -31,6 +31,12 @@ class EventReceiver(ConsumerMixin):
             This is  a map of event type names and their handlers.
             The special handler `"*"` captures all events that don't have a
             handler.
+        journal (celery.events.journal.EventJournal): Optional persistent
+            event journal. When set, every received event is appended to
+            the journal before being dispatched, so the event stream can
+            be replayed after a restart/reconnect via :meth:`catchup`.
+            When ``None`` (the default) monitoring behaves exactly as
+            before.
     """
 
     app = None
@@ -39,7 +45,7 @@ class EventReceiver(ConsumerMixin):
                  node_id=None, app=None, queue_prefix=None,
                  accept=None, queue_ttl=None, queue_expires=None,
                  queue_exclusive=None,
-                 queue_durable=None):
+                 queue_durable=None, journal=None):
         self.app = app_or_default(app or self.app)
         self.channel = maybe_channel(channel)
         self.handlers = {} if handlers is None else handlers
@@ -78,11 +84,41 @@ class EventReceiver(ConsumerMixin):
         if accept is None:
             accept = {self.app.conf.event_serializer, 'json'}
         self.accept = accept
+        self.journal = journal
 
     def process(self, type, event):
-        """Process event by dispatching to configured handler."""
+        """Process event: persist to journal (if enabled), then dispatch."""
+        if self.journal is not None:
+            # Append first so an event is durable even if a handler raises;
+            # replay then provides at-least-once delivery after a crash.
+            self.journal.append(event)
+        self.dispatch(type, event)
+
+    def dispatch(self, type, event):
+        """Dispatch event to the configured handler without journaling it."""
         handler = self.handlers.get(type) or self.handlers.get('*')
         handler and handler(event)
+
+    def catchup(self, after_cursor=0, limit=None, **filters):
+        """Replay journaled events to the configured handlers.
+
+        Entries with ``seq > after_cursor`` are dispatched exactly as live
+        events would be (without being appended to the journal again), and
+        the cursor of the last replayed entry is returned. Pass that value
+        back in after a restart/reconnect to resume the stream with no
+        gaps or duplicates. Supports the same filters as
+        :meth:`celery.events.journal.EventJournal.read`.
+
+        Returns *after_cursor* unchanged when no journal is configured.
+        """
+        if self.journal is None:
+            return after_cursor
+        last_cursor = after_cursor
+        for entry in self.journal.replay(
+                after_cursor=after_cursor, limit=limit, **filters):
+            self.dispatch(entry.type, entry.event)
+            last_cursor = entry.seq
+        return last_cursor
 
     def get_consumers(self, Consumer, channel):
         return [Consumer(queues=[self.queue],

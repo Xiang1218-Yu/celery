@@ -7,9 +7,14 @@ is enabled), used for monitoring purposes.
 
 from .dispatcher import EventDispatcher
 from .event import Event, event_exchange, get_exchange, group_from
+from .journal import (EventJournal, FileJournalStorage, JournalEntry,
+                      JournalStorage, MemoryJournalStorage,
+                      SqliteJournalStorage)
 from .receiver import EventReceiver
 
 __all__ = (
-    'Event', 'EventDispatcher', 'EventReceiver',
+    'Event', 'EventDispatcher', 'EventJournal', 'EventReceiver',
+    'FileJournalStorage', 'JournalEntry', 'JournalStorage',
+    'MemoryJournalStorage', 'SqliteJournalStorage',
     'event_exchange', 'get_exchange', 'group_from',
 )

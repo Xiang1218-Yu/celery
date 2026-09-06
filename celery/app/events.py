@@ -10,6 +10,7 @@ class Events:
     receiver_cls = 'celery.events.receiver:EventReceiver'
     dispatcher_cls = 'celery.events.dispatcher:EventDispatcher'
     state_cls = 'celery.events.state:State'
+    journal_cls = 'celery.events.journal:EventJournal'
 
     def __init__(self, app=None):
         self.app = app
@@ -28,6 +29,11 @@ class Events:
     def State(self):
         return self.app.subclass_with_self(
             self.state_cls, reverse='events.State')
+
+    @cached_property
+    def Journal(self):
+        return self.app.subclass_with_self(
+            self.journal_cls, reverse='events.Journal')
 
     @contextmanager
     def default_dispatcher(self, hostname=None, enabled=True,
